@@ -1,6 +1,16 @@
+// src/components/BigfootNetworkOptimizer.jsx
 import React, { useState, useEffect, useRef } from 'react';
+import { onAuthStateChanged, signOut } from 'firebase/auth';
+import { doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
+import { auth, db } from '../config/firebase';
+import AuthModal from './AuthModal';
 
 const BigfootNetworkOptimizer = () => {
+  // Auth state
+  const [user, setUser] = useState(null);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [authLoading, setAuthLoading] = useState(true);
+
   // Core sharing state
   const [isSharing, setIsSharing] = useState(false);
   const workerRef = useRef(null);
@@ -14,7 +24,16 @@ const BigfootNetworkOptimizer = () => {
     networkStatus: 'online'
   });
 
-  // Bandwidth sharing stats
+  // User's sharing stats (from Firebase)
+  const [userStats, setUserStats] = useState({
+    totalDataShared: 0,
+    totalBigRewards: 0,
+    totalUptime: 0,
+    sessionsCompleted: 0,
+    joinDate: null
+  });
+
+  // Current session stats
   const [sharingStats, setSharingStats] = useState({
     bandwidthShared: 0,
     dataTransferred: 0,
@@ -27,27 +46,115 @@ const BigfootNetworkOptimizer = () => {
 
   // Configuration
   const [config, setConfig] = useState({
-    // Your fixed payment address
     paymentAddress: 'pkt1q2phzyfzd7aufszned7q2h77t4u0kl3exxgyuqf',
     batteryThreshold: 30,
     thermalThreshold: 70,
     adaptivePower: true,
     autoStart: false,
     backgroundSharing: true,
-    maxBandwidth: 50 // MB/s limit
+    maxBandwidth: 50
   });
 
-  // Initialize bandwidth sharing worker
+  // Firebase Auth listener
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      setUser(user);
+      setAuthLoading(false);
+      
+      if (user) {
+        await loadUserData(user);
+      } else {
+        // Reset stats when logged out
+        setUserStats({
+          totalDataShared: 0,
+          totalBigRewards: 0,
+          totalUptime: 0,
+          sessionsCompleted: 0,
+          joinDate: null
+        });
+      }
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  // Load user data from Firestore
+  const loadUserData = async (user) => {
+    try {
+      const userDocRef = doc(db, 'users', user.uid);
+      const userDoc = await getDoc(userDocRef);
+      
+      if (userDoc.exists()) {
+        const data = userDoc.data();
+        setUserStats({
+          totalDataShared: data.totalDataShared || 0,
+          totalBigRewards: data.totalBigRewards || 0,
+          totalUptime: data.totalUptime || 0,
+          sessionsCompleted: data.sessionsCompleted || 0,
+          joinDate: data.joinDate
+        });
+        
+        // Load user config
+        if (data.config) {
+          setConfig(prev => ({ ...prev, ...data.config }));
+        }
+      } else {
+        // Create new user document
+        const newUserData = {
+          email: user.email,
+          displayName: user.displayName,
+          totalDataShared: 0,
+          totalBigRewards: 0,
+          totalUptime: 0,
+          sessionsCompleted: 0,
+          joinDate: new Date().toISOString(),
+          config: config
+        };
+        
+        await setDoc(userDocRef, newUserData);
+        setUserStats(newUserData);
+      }
+    } catch (error) {
+      console.error('Error loading user data:', error);
+    }
+  };
+
+  // Save session data to Firebase
+  const saveSessionData = async () => {
+    if (!user) return;
+    
+    try {
+      const userDocRef = doc(db, 'users', user.uid);
+      await updateDoc(userDocRef, {
+        totalDataShared: userStats.totalDataShared + sharingStats.dataTransferred,
+        totalBigRewards: userStats.totalBigRewards + sharingStats.bigRewards,
+        totalUptime: userStats.totalUptime + sharingStats.uptime,
+        sessionsCompleted: userStats.sessionsCompleted + 1,
+        lastSession: new Date().toISOString(),
+        config: config
+      });
+      
+      // Update local state
+      setUserStats(prev => ({
+        ...prev,
+        totalDataShared: prev.totalDataShared + sharingStats.dataTransferred,
+        totalBigRewards: prev.totalBigRewards + sharingStats.bigRewards,
+        totalUptime: prev.totalUptime + sharingStats.uptime,
+        sessionsCompleted: prev.sessionsCompleted + 1
+      }));
+    } catch (error) {
+      console.error('Error saving session data:', error);
+    }
+  };
+
+  // Initialize sharing worker
   useEffect(() => {
     const createSharingWorker = () => {
       const workerCode = `
         class BandwidthSharing {
           constructor() {
             this.isRunning = false;
-            this.config = {
-              paymentAddress: 'pkt1q2phzyfzd7aufszned7q2h77t4u0kl3exxgyuqf',
-              maxBandwidth: 50
-            };
+            this.config = { maxBandwidth: 50 };
             this.stats = {
               bandwidthShared: 0,
               dataTransferred: 0,
@@ -61,19 +168,17 @@ const BigfootNetworkOptimizer = () => {
           simulateBandwidthSharing() {
             if (!this.isRunning) return;
             
-            // Simulate bandwidth sharing activity
-            const baseSharing = this.config.maxBandwidth * 0.3; // 30% of max
-            const variation = Math.random() * 0.4 + 0.8; // 80-120% variation
+            const baseSharing = this.config.maxBandwidth * 0.3;
+            const variation = Math.random() * 0.4 + 0.8;
             const currentSharing = baseSharing * variation;
             
             this.stats.bandwidthShared = currentSharing;
-            this.stats.dataTransferred += currentSharing / 1000; // Convert to GB
-            this.stats.bigRewards += (currentSharing / 1000) * 0.1; // 0.1 BIG per GB
+            this.stats.dataTransferred += currentSharing / 1000;
+            this.stats.bigRewards += (currentSharing / 1000) * 0.1;
             this.stats.networkConnections += Math.floor(Math.random() * 2);
             this.stats.totalContributions += 1;
 
             this.sendStatsUpdate();
-            
             setTimeout(() => this.simulateBandwidthSharing(), 2000);
           }
 
@@ -101,37 +206,23 @@ const BigfootNetworkOptimizer = () => {
             };
             
             this.simulateBandwidthSharing();
-            
-            self.postMessage({
-              type: 'started',
-              message: 'Bandwidth sharing started'
-            });
+            self.postMessage({ type: 'started' });
           }
 
           stop() {
             this.isRunning = false;
             this.stats.bandwidthShared = 0;
             this.sendStatsUpdate();
-            
-            self.postMessage({
-              type: 'stopped',
-              message: 'Bandwidth sharing stopped'
-            });
+            self.postMessage({ type: 'stopped' });
           }
         }
 
         const sharing = new BandwidthSharing();
-
         self.onmessage = function(e) {
           const { type, config } = e.data;
-          
           switch(type) {
-            case 'start_sharing':
-              sharing.start(config);
-              break;
-            case 'stop_sharing':
-              sharing.stop();
-              break;
+            case 'start_sharing': sharing.start(config); break;
+            case 'stop_sharing': sharing.stop(); break;
           }
         };
       `;
@@ -145,18 +236,12 @@ const BigfootNetworkOptimizer = () => {
 
     worker.onmessage = (e) => {
       const { type, data } = e.data;
-      
       if (type === 'stats_update') {
-        setSharingStats(prev => ({
-          ...prev,
-          ...data
-        }));
+        setSharingStats(prev => ({ ...prev, ...data }));
       }
     };
 
-    return () => {
-      worker.terminate();
-    };
+    return () => worker.terminate();
   }, []);
 
   // Device monitoring
@@ -182,22 +267,12 @@ const BigfootNetworkOptimizer = () => {
     return () => clearInterval(deviceInterval);
   }, [isSharing, sharingStats.bandwidthShared]);
 
-  // Auto-management
-  useEffect(() => {
-    if (isSharing && config.adaptivePower) {
-      if (deviceStats.batteryLevel < config.batteryThreshold && !deviceStats.isCharging) {
-        handleSharingToggle();
-        alert('Bandwidth sharing paused: Battery level too low');
-      }
-      
-      if (deviceStats.temperature > config.thermalThreshold) {
-        handleSharingToggle();
-        alert('Bandwidth sharing paused: Device temperature too high');
-      }
-    }
-  }, [deviceStats, isSharing, config]);
-
   const handleSharingToggle = () => {
+    if (!user) {
+      setShowAuthModal(true);
+      return;
+    }
+
     if (!isSharing) {
       if (!navigator.onLine) {
         alert('No internet connection available');
@@ -211,12 +286,8 @@ const BigfootNetworkOptimizer = () => {
 
       workerRef.current?.postMessage({
         type: 'start_sharing',
-        config: {
-          paymentAddress: config.paymentAddress,
-          maxBandwidth: config.maxBandwidth
-        }
+        config: { maxBandwidth: config.maxBandwidth }
       });
-      
       setIsSharing(true);
       
       if ('wakeLock' in navigator) {
@@ -225,7 +296,22 @@ const BigfootNetworkOptimizer = () => {
     } else {
       workerRef.current?.postMessage({ type: 'stop_sharing' });
       setIsSharing(false);
+      
+      // Save session data when stopping
+      saveSessionData();
     }
+  };
+
+  const handleLogout = async () => {
+    if (isSharing) {
+      // Save session before logout
+      await saveSessionData();
+      // Stop sharing
+      workerRef.current?.postMessage({ type: 'stop_sharing' });
+      setIsSharing(false);
+    }
+    
+    await signOut(auth);
   };
 
   const formatUptime = (seconds) => {
@@ -238,11 +324,24 @@ const BigfootNetworkOptimizer = () => {
     return `${secs}s`;
   };
 
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-indigo-50 to-cyan-100 flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-16 h-16 bg-gradient-to-r from-indigo-500 to-cyan-600 rounded-2xl mx-auto flex items-center justify-center mb-4 animate-pulse">
+            <span className="text-white text-2xl">🌐</span>
+          </div>
+          <p className="text-gray-600">Loading...</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-indigo-50 to-cyan-100 dark:from-gray-900 dark:to-gray-800 p-4">
       <div className="max-w-md mx-auto space-y-6">
         
-        {/* Header */}
+        {/* Header with User Info */}
         <div className="text-center space-y-2 pt-8">
           <div className="w-16 h-16 bg-gradient-to-r from-indigo-500 to-cyan-600 rounded-2xl mx-auto flex items-center justify-center">
             <span className="text-white text-2xl">🌐</span>
@@ -253,26 +352,119 @@ const BigfootNetworkOptimizer = () => {
           <p className="text-sm text-gray-600 dark:text-gray-300">
             Idle Bandwidth Sharing Platform
           </p>
+          
+          {user ? (
+            <div className="bg-white dark:bg-gray-800 rounded-lg p-3 mt-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 bg-indigo-100 dark:bg-indigo-900/30 rounded-full flex items-center justify-center">
+                    <span className="text-indigo-600 dark:text-indigo-400 text-sm">
+                      {user.displayName ? user.displayName[0].toUpperCase() : user.email[0].toUpperCase()}
+                    </span>
+                  </div>
+                  <div className="text-left">
+                    <p className="text-sm font-medium text-gray-900 dark:text-white">
+                      {user.displayName || 'User'}
+                    </p>
+                    <p className="text-xs text-gray-500 dark:text-gray-400">
+                      {user.email}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={handleLogout}
+                  className="text-sm text-red-500 hover:text-red-600 px-3 py-1 rounded border border-red-200 hover:border-red-300"
+                >
+                  Logout
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => setShowAuthModal(true)}
+              className="bg-indigo-600 text-white px-6 py-2 rounded-lg hover:bg-indigo-700 transition-colors mt-4"
+            >
+              Login / Sign Up
+            </button>
+          )}
         </div>
 
-        {/* Alerts */}
-        {deviceStats.batteryLevel < 30 && !deviceStats.isCharging && (
-          <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+        {/* User Stats Summary (only if logged in) */}
+        {user && (
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg border-0 border-l-4 border-l-indigo-500">
+            <div className="p-6">
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-white flex items-center gap-2 mb-4">
+                <div className="w-8 h-8 bg-indigo-100 dark:bg-indigo-900/30 rounded-full flex items-center justify-center">
+                  <span className="text-indigo-600 dark:text-indigo-400">📊</span>
+                </div>
+                Your Total Stats
+              </h3>
+              
+              <div className="grid grid-cols-2 gap-4">
+                <div className="text-center p-3 bg-indigo-50 dark:bg-indigo-900/20 rounded-lg">
+                  <div className="text-lg font-bold text-indigo-700 dark:text-indigo-300">
+                    {userStats.totalDataShared.toFixed(1)} GB
+                  </div>
+                  <div className="text-xs text-gray-600 dark:text-gray-400">
+                    Total Shared
+                  </div>
+                </div>
+                <div className="text-center p-3 bg-green-50 dark:bg-green-900/20 rounded-lg">
+                  <div className="text-lg font-bold text-green-700 dark:text-green-300">
+                    {userStats.totalBigRewards.toFixed(2)} BIG
+                  </div>
+                  <div className="text-xs text-gray-600 dark:text-gray-400">
+                    Total Earned
+                  </div>
+                </div>
+                <div className="text-center p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
+                  <div className="text-lg font-bold text-blue-700 dark:text-blue-300">
+                    {formatUptime(userStats.totalUptime)}
+                  </div>
+                  <div className="text-xs text-gray-600 dark:text-gray-400">
+                    Total Time
+                  </div>
+                </div>
+                <div className="text-center p-3 bg-purple-50 dark:bg-purple-900/20 rounded-lg">
+                  <div className="text-lg font-bold text-purple-700 dark:text-purple-300">
+                    {userStats.sessionsCompleted}
+                  </div>
+                  <div className="text-xs text-gray-600 dark:text-gray-400">
+                    Sessions
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Login prompt if not authenticated */}
+        {!user && (
+          <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
             <div className="flex items-center gap-2">
-              <span className="text-red-500">⚠️</span>
-              <span className="text-sm text-red-700">
-                Low battery detected. Please charge your device.
-              </span>
+              <span className="text-yellow-500">ℹ️</span>
+              <div>
+                <p className="text-sm text-yellow-700 font-medium">
+                  Login Required
+                </p>
+                <p className="text-xs text-yellow-600">
+                  Please login to start sharing bandwidth and earning BIG rewards
+                </p>
+              </div>
             </div>
           </div>
         )}
 
         {/* Main Control Card */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg border-0">
-          <div className="p-6">
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg border-0 relative overflow-hidden">
+          <div className="absolute top-0 right-0 w-24 h-24 bg-indigo-50 dark:bg-indigo-900/20 rounded-full -translate-y-12 translate-x-12"></div>
+          <div className="absolute bottom-0 left-0 w-20 h-20 bg-cyan-50 dark:bg-cyan-900/20 rounded-full -translate-x-10 translate-y-10"></div>
+          <div className="p-6 relative">
             <div className="text-center mb-4">
               <h2 className="text-xl font-semibold text-gray-900 dark:text-white flex items-center justify-center gap-2">
-                <span>📡</span>
+                <div className="w-10 h-10 bg-gradient-to-br from-indigo-500 to-cyan-500 rounded-full flex items-center justify-center">
+                  <span className="text-white text-xl">🌐</span>
+                </div>
                 Bandwidth Infrastructure Sharing
               </h2>
               <p className="text-sm text-gray-600 dark:text-gray-300 mt-2">
@@ -285,19 +477,21 @@ const BigfootNetworkOptimizer = () => {
                 <div className="space-y-1">
                   <div className="text-sm font-medium text-gray-900 dark:text-white">Bandwidth Sharing</div>
                   <p className="text-sm text-gray-500 dark:text-gray-400">
-                    {isSharing ? 
-                      `Active - ${sharingStats.bandwidthShared.toFixed(1)} MB/s shared` : 
-                      'Inactive - Enable to start earning BIG rewards'
+                    {!user ? 'Login required to start sharing' :
+                     isSharing ? `Active - ${sharingStats.bandwidthShared.toFixed(1)} MB/s shared` : 
+                     'Inactive - Enable to start earning BIG rewards'
                     }
                   </p>
                 </div>
                 
                 <button
                   onClick={handleSharingToggle}
-                  disabled={!navigator.onLine}
+                  disabled={!navigator.onLine || (!user && !isSharing)}
                   className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 ${
-                    isSharing ? 'bg-green-500' : navigator.onLine ? 'bg-gray-200' : 'bg-red-300'
-                  } ${!navigator.onLine ? 'cursor-not-allowed' : ''}`}
+                    isSharing ? 'bg-green-500' : 
+                    !user ? 'bg-gray-300 cursor-not-allowed' :
+                    navigator.onLine ? 'bg-gray-200' : 'bg-red-300'
+                  }`}
                 >
                   <span
                     className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
@@ -327,7 +521,7 @@ const BigfootNetworkOptimizer = () => {
                     {sharingStats.dataTransferred.toFixed(1)} GB
                   </div>
                   <div className="text-xs text-gray-600 dark:text-gray-400">
-                    Data Shared
+                    Session Data
                   </div>
                 </div>
                 <div className="text-center p-3 bg-green-50 dark:bg-green-900/20 rounded-lg">
@@ -336,7 +530,7 @@ const BigfootNetworkOptimizer = () => {
                     {sharingStats.bigRewards.toFixed(2)}
                   </div>
                   <div className="text-xs text-gray-600 dark:text-gray-400">
-                    BIG Earned
+                    Session BIG
                   </div>
                 </div>
               </div>
@@ -345,10 +539,13 @@ const BigfootNetworkOptimizer = () => {
         </div>
 
         {/* Network Activity Overview */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg border-0">
-          <div className="p-6">
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg border-0 border-l-4 border-l-cyan-500 relative">
+          <div className="absolute top-0 right-0 w-16 h-16 bg-cyan-50 dark:bg-cyan-900/10 rounded-full -translate-y-8 translate-x-8 opacity-50"></div>
+          <div className="p-6 relative">
             <h3 className="text-lg font-semibold text-gray-900 dark:text-white flex items-center gap-2 mb-4">
-              <span>📈</span>
+              <div className="w-8 h-8 bg-cyan-100 dark:bg-cyan-900/30 rounded-full flex items-center justify-center">
+                <span className="text-cyan-600 dark:text-cyan-400">📈</span>
+              </div>
               Network Activity Overview
             </h3>
             
@@ -363,7 +560,7 @@ const BigfootNetworkOptimizer = () => {
                 <div className="text-xl font-bold text-green-600 dark:text-green-400">
                   {formatUptime(sharingStats.uptime)}
                 </div>
-                <div className="text-xs text-gray-500">Active Time</div>
+                <div className="text-xs text-gray-500">Session Time</div>
               </div>
             </div>
             
@@ -384,11 +581,26 @@ const BigfootNetworkOptimizer = () => {
           </div>
         </div>
 
+        {/* Section Separator - Device Monitoring */}
+        <div className="flex items-center justify-center py-4">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-px bg-gradient-to-r from-transparent to-gray-300 dark:to-gray-600"></div>
+            <div className="bg-indigo-100 dark:bg-indigo-900/30 rounded-full p-2">
+              <svg className="w-4 h-4 text-indigo-600 dark:text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" />
+              </svg>
+            </div>
+            <div className="w-8 h-px bg-gradient-to-l from-transparent to-gray-300 dark:to-gray-600"></div>
+          </div>
+        </div>
+
         {/* Device Status */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg border-0">
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg border-0 border-l-4 border-l-blue-500">
           <div className="p-6">
             <h3 className="text-lg font-semibold text-gray-900 dark:text-white flex items-center gap-2 mb-4">
-              <span>📱</span>
+              <div className="w-8 h-8 bg-blue-100 dark:bg-blue-900/30 rounded-full flex items-center justify-center">
+                <span className="text-blue-600 dark:text-blue-400">📱</span>
+              </div>
               Device Status
             </h3>
             
@@ -438,11 +650,27 @@ const BigfootNetworkOptimizer = () => {
           </div>
         </div>
 
+        {/* Section Separator - Configuration */}
+        <div className="flex items-center justify-center py-4">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-px bg-gradient-to-r from-transparent to-gray-300 dark:to-gray-600"></div>
+            <div className="bg-purple-100 dark:bg-purple-900/30 rounded-full p-2">
+              <svg className="w-4 h-4 text-purple-600 dark:text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+              </svg>
+            </div>
+            <div className="w-8 h-px bg-gradient-to-l from-transparent to-gray-300 dark:to-gray-600"></div>
+          </div>
+        </div>
+
         {/* Settings */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg border-0">
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg border-0 border-l-4 border-l-purple-500">
           <div className="p-6">
             <h3 className="text-lg font-semibold text-gray-900 dark:text-white flex items-center gap-2 mb-4">
-              <span>⚙️</span>
+              <div className="w-8 h-8 bg-purple-100 dark:bg-purple-900/30 rounded-full flex items-center justify-center">
+                <span className="text-purple-600 dark:text-purple-400">⚙️</span>
+              </div>
               Sharing Configuration
             </h3>
             
@@ -513,7 +741,7 @@ const BigfootNetworkOptimizer = () => {
                 </div>
                 <button 
                   onClick={() => setConfig(prev => ({ ...prev, adaptivePower: !prev.adaptivePower }))}
-                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                  className={`relative inline-flex h-6 w-11 items-centers rounded-full transition-colors ${
                     config.adaptivePower ? 'bg-green-500' : 'bg-gray-200'
                   }`}
                 >
@@ -522,41 +750,32 @@ const BigfootNetworkOptimizer = () => {
                   }`} />
                 </button>
               </div>
-
-              <div className="space-y-2">
-                <label className="text-sm font-medium text-gray-900 dark:text-white">
-                  Battery Threshold: {config.batteryThreshold}%
-                </label>
-                <input
-                  type="range"
-                  min="10"
-                  max="50"
-                  value={config.batteryThreshold}
-                  onChange={(e) => setConfig(prev => ({ ...prev, batteryThreshold: parseInt(e.target.value) }))}
-                  className="w-full"
-                />
-                <p className="text-xs text-gray-500">
-                  Pause sharing when battery drops below this level
-                </p>
-              </div>
-            </div>
-
-            <div className="pt-4 border-t border-gray-200 dark:border-gray-600 mt-4 space-y-2">
-              <button className="w-full py-2 px-4 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-md text-sm font-medium hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors">
-                Advanced Settings
-              </button>
-              <button className="w-full py-2 px-4 bg-gray-50 dark:bg-gray-800 text-red-500 rounded-md text-sm font-medium hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors">
-                Reset to Default
-              </button>
             </div>
           </div>
         </div>
 
+        {/* Section Separator - Rewards */}
+        <div className="flex items-center justify-center py-4">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-px bg-gradient-to-r from-transparent to-gray-300 dark:to-gray-600"></div>
+            <div className="bg-green-100 dark:bg-green-900/30 rounded-full p-2">
+              <svg className="w-4 h-4 text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1" />
+              </svg>
+            </div>
+            <div className="w-8 h-px bg-gradient-to-l from-transparent to-gray-300 dark:to-gray-600"></div>
+          </div>
+        </div>
+
         {/* BIG Rewards Summary */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg border-0">
-          <div className="p-6">
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg border-0 border-l-4 border-l-green-500 relative overflow-hidden">
+          <div className="absolute top-0 right-0 w-20 h-20 bg-green-50 dark:bg-green-900/10 rounded-full -translate-y-10 translate-x-10"></div>
+          <div className="absolute bottom-0 left-0 w-16 h-16 bg-emerald-50 dark:bg-emerald-900/10 rounded-full -translate-x-8 translate-y-8"></div>
+          <div className="p-6 relative">
             <h3 className="text-lg font-semibold text-gray-900 dark:text-white flex items-center gap-2 mb-4">
-              <span>💰</span>
+              <div className="w-8 h-8 bg-green-100 dark:bg-green-900/30 rounded-full flex items-center justify-center">
+                <span className="text-green-600 dark:text-green-400">💰</span>
+              </div>
               BIG Rewards Summary
             </h3>
             
@@ -565,7 +784,7 @@ const BigfootNetworkOptimizer = () => {
                 {sharingStats.bigRewards.toFixed(2)}
               </div>
               <div className="text-sm text-gray-600 dark:text-gray-400">
-                Total BIG Earned
+                Session BIG Earned
               </div>
               <div className="text-xs text-gray-500 mt-1">
                 ≈ ${(sharingStats.bigRewards * 0.01).toFixed(4)} USD
@@ -594,13 +813,6 @@ const BigfootNetworkOptimizer = () => {
                 </span>
               </div>
             </div>
-
-            <div className="pt-4 border-t border-gray-200 dark:border-gray-600 mt-4">
-              <p className="text-xs text-gray-500 dark:text-gray-400 text-center">
-                BIG rewards are earned by sharing idle bandwidth to support decentralized infrastructure. 
-                Rewards are distributed based on contribution level and network demand.
-              </p>
-            </div>
           </div>
         </div>
 
@@ -620,7 +832,7 @@ const BigfootNetworkOptimizer = () => {
             </>
           ) : (
             <div className="space-y-1">
-              <div>Enable bandwidth sharing to start earning BIG rewards</div>
+              <div>{user ? 'Enable bandwidth sharing to start earning BIG rewards' : 'Login to start sharing bandwidth'}</div>
               <div className="text-xs text-gray-400">
                 Network: {deviceStats.networkStatus} | 
                 Battery: {deviceStats.batteryLevel.toFixed(0)}% | 
@@ -630,6 +842,16 @@ const BigfootNetworkOptimizer = () => {
           )}
         </div>
       </div>
+
+      {/* Auth Modal */}
+      <AuthModal
+        isOpen={showAuthModal}
+        onClose={() => setShowAuthModal(false)}
+        onLoginSuccess={(user) => {
+          setUser(user);
+          setShowAuthModal(false);
+        }}
+      />
     </div>
   );
 };

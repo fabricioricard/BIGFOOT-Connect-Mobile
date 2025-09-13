@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">BIGFOOT Network</string>
+    <string name="title_activity_main">BIGFOOT Network</string>
+    <string name="package_name">com.bigfoot.network</string>
+    <string name="custom_url_scheme">com.bigfoot.network</string>
+</resources>
