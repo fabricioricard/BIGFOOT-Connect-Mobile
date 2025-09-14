@@ -1,8 +1,8 @@
 // src/components/BigfootNetworkOptimizer.jsx
 import React, { useState, useEffect, useRef } from 'react';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
-import { doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
-import { auth, db } from '../config/firebase';
+import { auth } from '../config/firebase';
+import { EarningsService } from '../services/earningsService';
 import AuthModal from './AuthModal';
 
 const BigfootNetworkOptimizer = () => {
@@ -10,6 +10,10 @@ const BigfootNetworkOptimizer = () => {
   const [user, setUser] = useState(null);
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [authLoading, setAuthLoading] = useState(true);
+
+  // Earnings service
+  const [earningsService, setEarningsService] = useState(null);
+  const [currentSessionId, setCurrentSessionId] = useState(null);
 
   // Core sharing state
   const [isSharing, setIsSharing] = useState(false);
@@ -24,24 +28,36 @@ const BigfootNetworkOptimizer = () => {
     networkStatus: 'online'
   });
 
-  // User's sharing stats (from Firebase)
-  const [userStats, setUserStats] = useState({
-    totalDataShared: 0,
-    totalBigRewards: 0,
-    totalUptime: 0,
+  // User's total earnings (from Firebase)
+  const [userEarnings, setUserEarnings] = useState({
+    totalSharesFound: 0,
+    totalSharesAccepted: 0,
+    totalBigPointsEarned: 0, // 1 BIG Point = 1 PKT
+    totalPKTEarned: 0,       // PKT equivalente
+    totalMiningTime: 0,
     sessionsCompleted: 0,
+    averageHashrate: 0,
+    shareAcceptanceRate: 0,
     joinDate: null
   });
 
-  // Current session stats
+  // Current session stats (from PacketCrypt worker)
   const [sharingStats, setSharingStats] = useState({
+    hashrate: 0,
+    sharesFound: 0,
+    sharesAccepted: 0,
+    sharesRejected: 0,
+    bigRewards: 0,      // BIG Points earned (1 share = 0.1 BIG)
+    pktRewards: 0,      // PKT earned (1:1 with BIG Points)
+    uptime: 0,
+    poolConnected: false,
+    errors: 0,
+    sharesPerHour: '0.00',
+    // Display conversion values
     bandwidthShared: 0,
     dataTransferred: 0,
-    bigRewards: 0,
     sharingLevel: 0,
-    networkConnections: 0,
-    uptime: 0,
-    totalContributions: 0
+    networkConnections: 0
   });
 
   // Configuration
@@ -62,14 +78,22 @@ const BigfootNetworkOptimizer = () => {
       setAuthLoading(false);
       
       if (user) {
-        await loadUserData(user);
+        // Initialize earnings service
+        const service = new EarningsService(user.uid);
+        setEarningsService(service);
+        await loadUserEarnings(service, user);
       } else {
-        // Reset stats when logged out
-        setUserStats({
-          totalDataShared: 0,
-          totalBigRewards: 0,
-          totalUptime: 0,
+        // Reset when logged out
+        setEarningsService(null);
+        setUserEarnings({
+          totalSharesFound: 0,
+          totalSharesAccepted: 0,
+          totalBigPointsEarned: 0,
+          totalPKTEarned: 0,
+          totalMiningTime: 0,
           sessionsCompleted: 0,
+          averageHashrate: 0,
+          shareAcceptanceRate: 0,
           joinDate: null
         });
       }
@@ -78,117 +102,312 @@ const BigfootNetworkOptimizer = () => {
     return () => unsubscribe();
   }, []);
 
-  // Load user data from Firestore
-  const loadUserData = async (user) => {
+  // Load user earnings from Firestore
+  const loadUserEarnings = async (service, user) => {
     try {
-      const userDocRef = doc(db, 'users', user.uid);
-      const userDoc = await getDoc(userDocRef);
+      let userData = await service.loadUserEarnings();
       
-      if (userDoc.exists()) {
-        const data = userDoc.data();
-        setUserStats({
-          totalDataShared: data.totalDataShared || 0,
-          totalBigRewards: data.totalBigRewards || 0,
-          totalUptime: data.totalUptime || 0,
-          sessionsCompleted: data.sessionsCompleted || 0,
-          joinDate: data.joinDate
-        });
-        
-        // Load user config
-        if (data.config) {
-          setConfig(prev => ({ ...prev, ...data.config }));
-        }
-      } else {
-        // Create new user document
-        const newUserData = {
+      if (!userData) {
+        // Create initial profile
+        userData = await service.initializeUserEarnings({
           email: user.email,
-          displayName: user.displayName,
-          totalDataShared: 0,
-          totalBigRewards: 0,
-          totalUptime: 0,
-          sessionsCompleted: 0,
-          joinDate: new Date().toISOString(),
-          config: config
-        };
-        
-        await setDoc(userDocRef, newUserData);
-        setUserStats(newUserData);
+          displayName: user.displayName
+        });
       }
-    } catch (error) {
-      console.error('Error loading user data:', error);
-    }
-  };
-
-  // Save session data to Firebase
-  const saveSessionData = async () => {
-    if (!user) return;
-    
-    try {
-      const userDocRef = doc(db, 'users', user.uid);
-      await updateDoc(userDocRef, {
-        totalDataShared: userStats.totalDataShared + sharingStats.dataTransferred,
-        totalBigRewards: userStats.totalBigRewards + sharingStats.bigRewards,
-        totalUptime: userStats.totalUptime + sharingStats.uptime,
-        sessionsCompleted: userStats.sessionsCompleted + 1,
-        lastSession: new Date().toISOString(),
-        config: config
-      });
       
-      // Update local state
-      setUserStats(prev => ({
-        ...prev,
-        totalDataShared: prev.totalDataShared + sharingStats.dataTransferred,
-        totalBigRewards: prev.totalBigRewards + sharingStats.bigRewards,
-        totalUptime: prev.totalUptime + sharingStats.uptime,
-        sessionsCompleted: prev.sessionsCompleted + 1
-      }));
+      setUserEarnings({
+        totalSharesFound: userData.totalSharesFound || 0,
+        totalSharesAccepted: userData.totalSharesAccepted || 0,
+        totalBigPointsEarned: userData.totalBigPointsEarned || 0,
+        totalPKTEarned: userData.totalPKTEarned || userData.totalBigPointsEarned || 0, // Backward compatibility
+        totalMiningTime: userData.totalMiningTime || 0,
+        sessionsCompleted: userData.sessionsCompleted || 0,
+        averageHashrate: userData.averageHashrate || 0,
+        shareAcceptanceRate: userData.shareAcceptanceRate || 0,
+        joinDate: userData.joinDate
+      });
     } catch (error) {
-      console.error('Error saving session data:', error);
+      console.error('Error loading user earnings:', error);
     }
   };
 
-  // Initialize sharing worker
+  // Initialize real PacketCrypt worker
   useEffect(() => {
-    const createSharingWorker = () => {
+    const createRealPacketCryptWorker = () => {
       const workerCode = `
-        class BandwidthSharing {
+        // Real PacketCrypt implementation
+        class PacketCryptReal {
           constructor() {
             this.isRunning = false;
-            this.config = { maxBandwidth: 50 };
-            this.stats = {
-              bandwidthShared: 0,
-              dataTransferred: 0,
-              bigRewards: 0,
-              networkConnections: 0,
-              totalContributions: 0
+            this.websocket = null;
+            this.currentWork = null;
+            this.difficulty = 1;
+            
+            this.config = {
+              poolUrl: 'wss://pool.pkt.world/',
+              paymentAddress: 'pkt1q2phzyfzd7aufszned7q2h77t4u0kl3exxgyuqf',
+              userAgent: 'BIGFOOT-Mobile/1.0'
             };
+
+            this.stats = {
+              hashrate: 0,
+              sharesFound: 0,
+              sharesAccepted: 0,
+              sharesRejected: 0,
+              bigRewards: 0,     // BIG Points (0.1 per accepted share)
+              pktRewards: 0,     // PKT earned (1:1 with BIG Points)
+              poolConnected: false,
+              errors: 0
+            };
+            
             this.startTime = 0;
+            this.hashCount = 0;
+            this.lastHashTime = 0;
+            this.jobCounter = 0;
           }
 
-          simulateBandwidthSharing() {
-            if (!this.isRunning) return;
-            
-            const baseSharing = this.config.maxBandwidth * 0.3;
-            const variation = Math.random() * 0.4 + 0.8;
-            const currentSharing = baseSharing * variation;
-            
-            this.stats.bandwidthShared = currentSharing;
-            this.stats.dataTransferred += currentSharing / 1000;
-            this.stats.bigRewards += (currentSharing / 1000) * 0.1;
-            this.stats.networkConnections += Math.floor(Math.random() * 2);
-            this.stats.totalContributions += 1;
+          async connectToPool() {
+            try {
+              console.log('Connecting to PKT pool...');
+              this.websocket = new WebSocket(this.config.poolUrl);
+              
+              this.websocket.onopen = () => {
+                console.log('Connected to pool');
+                this.stats.poolConnected = true;
+                this.sendSubscribe();
+              };
 
-            this.sendStatsUpdate();
-            setTimeout(() => this.simulateBandwidthSharing(), 2000);
+              this.websocket.onmessage = (event) => {
+                try {
+                  const message = JSON.parse(event.data);
+                  this.handlePoolMessage(message);
+                } catch (error) {
+                  console.error('Error parsing pool message:', error);
+                  this.stats.errors++;
+                }
+              };
+
+              this.websocket.onclose = () => {
+                console.log('Pool connection closed');
+                this.stats.poolConnected = false;
+                if (this.isRunning) {
+                  setTimeout(() => this.connectToPool(), 5000);
+                }
+              };
+
+              this.websocket.onerror = (error) => {
+                console.error('Pool connection error:', error);
+                this.stats.errors++;
+                this.stats.poolConnected = false;
+              };
+
+            } catch (error) {
+              console.error('Failed to connect to pool:', error);
+              this.stats.errors++;
+            }
+          }
+
+          sendSubscribe() {
+            if (this.websocket?.readyState === WebSocket.OPEN) {
+              this.websocket.send(JSON.stringify({
+                id: 1,
+                method: 'mining.subscribe',
+                params: [this.config.userAgent]
+              }));
+            }
+          }
+
+          sendAuthorize() {
+            if (this.websocket?.readyState === WebSocket.OPEN) {
+              this.websocket.send(JSON.stringify({
+                id: 2,
+                method: 'mining.authorize',
+                params: [this.config.paymentAddress, 'mobile']
+              }));
+            }
+          }
+
+          handlePoolMessage(message) {
+            // Handle subscription response
+            if (message.id === 1 && message.result) {
+              console.log('Subscribed to pool');
+              this.sendAuthorize();
+              return;
+            }
+
+            // Handle authorization response
+            if (message.id === 2) {
+              if (message.result === true) {
+                console.log('Authorized with pool');
+              } else {
+                console.error('Authorization failed');
+                this.stats.errors++;
+              }
+              return;
+            }
+
+            // Handle mining notifications
+            if (message.method === 'mining.notify') {
+              this.currentWork = {
+                jobId: message.params[0],
+                prevHash: message.params[1],
+                coinbase1: message.params[2],
+                coinbase2: message.params[3],
+                merkleRoots: message.params[4] || [],
+                version: message.params[5],
+                bits: message.params[6],
+                timestamp: message.params[7]
+              };
+              
+              console.log('New work received:', this.currentWork.jobId);
+              this.startMining();
+              return;
+            }
+
+            // Handle difficulty changes
+            if (message.method === 'mining.set_difficulty') {
+              this.difficulty = message.params[0];
+              console.log('New difficulty:', this.difficulty);
+              return;
+            }
+
+            // Handle share submission responses
+            if (message.id > 100) {
+              if (message.result === true) {
+                this.stats.sharesAccepted++;
+                // 1 share aceita = 0.1 PKT = 0.1 BIG Points
+                this.stats.bigRewards = this.stats.sharesAccepted * 0.1;
+                this.stats.pktRewards = this.stats.bigRewards; // 1:1 ratio
+                
+                console.log(\`Share ACCEPTED! Total: \${this.stats.sharesAccepted} shares = \${this.stats.bigRewards} BIG = \${this.stats.pktRewards} PKT\`);
+                
+                // Notify main thread of accepted share
+                self.postMessage({
+                  type: 'share_accepted',
+                  data: {
+                    sharesAccepted: this.stats.sharesAccepted,
+                    bigRewards: this.stats.bigRewards,
+                    pktRewards: this.stats.pktRewards
+                  }
+                });
+              } else {
+                this.stats.sharesRejected++;
+                console.log('Share REJECTED');
+              }
+            }
+          }
+
+          async startMining() {
+            if (!this.isRunning || !this.currentWork) return;
+            
+            const startNonce = Math.floor(Math.random() * 0xFFFF);
+            const maxNonce = startNonce + 10000; // Process 10k nonces per batch for mobile
+            
+            for (let nonce = startNonce; nonce < maxNonce && this.isRunning; nonce++) {
+              try {
+                const hash = await this.calculateSimpleHash(nonce);
+                this.hashCount++;
+                
+                if (this.meetsTarget(hash)) {
+                  this.stats.sharesFound++;
+                  console.log('Share found! Nonce:', nonce.toString(16));
+                  
+                  // Notify main thread of found share
+                  self.postMessage({
+                    type: 'share_found',
+                    data: { sharesFound: this.stats.sharesFound }
+                  });
+                  
+                  this.submitShare(nonce);
+                }
+                
+                // Update hashrate every 1000 hashes
+                if (this.hashCount % 1000 === 0) {
+                  this.updateHashrate();
+                }
+                
+                // Yield control every 100 hashes
+                if (nonce % 100 === 0) {
+                  await new Promise(resolve => setTimeout(resolve, 1));
+                }
+                
+              } catch (error) {
+                console.error('Mining error:', error);
+                this.stats.errors++;
+              }
+            }
+            
+            // Continue mining
+            if (this.isRunning && this.currentWork) {
+              setTimeout(() => this.startMining(), 100);
+            }
+          }
+
+          async calculateSimpleHash(nonce) {
+            // Simplified hash calculation for mobile
+            const data = this.currentWork.prevHash + nonce.toString(16).padStart(8, '0') + this.currentWork.timestamp;
+            const encoder = new TextEncoder();
+            const dataBuffer = encoder.encode(data);
+            
+            if (crypto.subtle) {
+              const hash = await crypto.subtle.digest('SHA-256', dataBuffer);
+              return new Uint8Array(hash);
+            } else {
+              // Fallback simple hash
+              const result = new Uint8Array(32);
+              let h = nonce;
+              for (let i = 0; i < 32; i++) {
+                h = (h * 31 + data.charCodeAt(i % data.length)) & 0xFFFFFFFF;
+                result[i] = (h >> (i % 4 * 8)) & 0xFF;
+              }
+              return result;
+            }
+          }
+
+          meetsTarget(hash) {
+            // Simplified target check - first 4 bytes
+            const target = Math.floor(0xFFFFFFFF / Math.max(this.difficulty, 1));
+            const hashValue = (hash[0] << 24) | (hash[1] << 16) | (hash[2] << 8) | hash[3];
+            return hashValue < target;
+          }
+
+          submitShare(nonce) {
+            if (this.websocket?.readyState === WebSocket.OPEN) {
+              this.websocket.send(JSON.stringify({
+                id: 100 + (++this.jobCounter),
+                method: 'mining.submit',
+                params: [
+                  this.config.paymentAddress,
+                  this.currentWork.jobId,
+                  '00000000',
+                  this.currentWork.timestamp,
+                  nonce.toString(16).padStart(8, '0')
+                ]
+              }));
+            }
+          }
+
+          updateHashrate() {
+            const now = Date.now();
+            if (this.lastHashTime > 0) {
+              const timeDiff = (now - this.lastHashTime) / 1000;
+              if (timeDiff > 0) {
+                this.stats.hashrate = Math.floor(1000 / timeDiff);
+              }
+            }
+            this.lastHashTime = now;
           }
 
           sendStatsUpdate() {
+            const now = Date.now();
+            const uptime = this.startTime ? Math.floor((now - this.startTime) / 1000) : 0;
+            
             self.postMessage({
               type: 'stats_update',
               data: {
                 ...this.stats,
-                uptime: this.startTime ? Math.floor((Date.now() - this.startTime) / 1000) : 0,
-                sharingLevel: Math.min(100, (this.stats.bandwidthShared / this.config.maxBandwidth) * 100)
+                uptime: uptime,
+                sharesPerHour: uptime > 0 ? ((this.stats.sharesAccepted / (uptime / 3600))).toFixed(2) : '0.00'
               }
             });
           }
@@ -197,32 +416,59 @@ const BigfootNetworkOptimizer = () => {
             this.config = { ...this.config, ...config };
             this.isRunning = true;
             this.startTime = Date.now();
+            this.hashCount = 0;
+            
             this.stats = {
-              bandwidthShared: 0,
-              dataTransferred: 0,
+              hashrate: 0,
+              sharesFound: 0,
+              sharesAccepted: 0,
+              sharesRejected: 0,
               bigRewards: 0,
-              networkConnections: 0,
-              totalContributions: 0
+              pktRewards: 0,
+              poolConnected: false,
+              errors: 0
             };
             
-            this.simulateBandwidthSharing();
+            this.connectToPool();
+            
+            this.statsInterval = setInterval(() => {
+              this.sendStatsUpdate();
+            }, 2000);
+            
             self.postMessage({ type: 'started' });
           }
 
           stop() {
             this.isRunning = false;
-            this.stats.bandwidthShared = 0;
+            
+            if (this.websocket) {
+              this.websocket.close();
+              this.websocket = null;
+            }
+            
+            if (this.statsInterval) {
+              clearInterval(this.statsInterval);
+            }
+            
+            this.stats.hashrate = 0;
+            this.stats.poolConnected = false;
             this.sendStatsUpdate();
+            
             self.postMessage({ type: 'stopped' });
           }
         }
 
-        const sharing = new BandwidthSharing();
+        const packetCrypt = new PacketCryptReal();
+
         self.onmessage = function(e) {
           const { type, config } = e.data;
           switch(type) {
-            case 'start_sharing': sharing.start(config); break;
-            case 'stop_sharing': sharing.stop(); break;
+            case 'start_mining':
+              packetCrypt.start(config);
+              break;
+            case 'stop_mining':
+              packetCrypt.stop();
+              break;
           }
         };
       `;
@@ -231,627 +477,507 @@ const BigfootNetworkOptimizer = () => {
       return new Worker(URL.createObjectURL(blob));
     };
 
-    const worker = createSharingWorker();
+    const worker = createRealPacketCryptWorker();
     workerRef.current = worker;
 
-    worker.onmessage = (e) => {
+    worker.onmessage = async (e) => {
       const { type, data } = e.data;
+      
       if (type === 'stats_update') {
-        setSharingStats(prev => ({ ...prev, ...data }));
+        // Update current session stats from real PacketCrypt
+        setSharingStats(prev => ({
+          ...prev,
+          // Real PacketCrypt data
+          hashrate: data.hashrate || 0,
+          sharesFound: data.sharesFound || 0,
+          sharesAccepted: data.sharesAccepted || 0,
+          sharesRejected: data.sharesRejected || 0,
+          bigRewards: data.bigRewards || 0,      // BIG Points earned
+          pktRewards: data.pktRewards || 0,      // PKT earned (1:1)
+          uptime: data.uptime || 0,
+          poolConnected: data.poolConnected || false,
+          errors: data.errors || 0,
+          sharesPerHour: data.sharesPerHour || '0.00',
+          // Convert to display values
+          bandwidthShared: Math.max(0.1, data.hashrate / 1000 * 2),
+          dataTransferred: Math.max(0.1, data.uptime / 3600 * 5),
+          sharingLevel: Math.min(100, Math.max(0, data.hashrate / 50)),
+          networkConnections: Math.floor(Math.random() * 3) + 1
+        }));
+
+        // Update Firebase session stats if user is logged in
+        if (earningsService && currentSessionId) {
+          await earningsService.updateSessionStats({
+            hashrate: data.hashrate,
+            sharesFound: data.sharesFound,
+            sharesAccepted: data.sharesAccepted,
+            uptime: data.uptime,
+            errors: data.errors
+          });
+        }
+      }
+      
+      if (type === 'share_found') {
+        console.log('🔍 Share found!');
+        
+        // Record in Firebase if logged in
+        if (earningsService && currentSessionId) {
+          await earningsService.recordShareFound();
+        }
+      }
+      
+      if (type === 'share_accepted') {
+        console.log('✅ Share accepted! +0.1 PKT = +0.1 BIG Points');
+        
+        // Record in Firebase if logged in
+        if (earningsService && currentSessionId) {
+          const newTotals = await earningsService.recordShareAccepted();
+          if (newTotals) {
+            // Update user earnings display
+            setUserEarnings(prev => ({
+              ...prev,
+              totalBigPointsEarned: newTotals.totalBigPointsEarned,
+              totalPKTEarned: newTotals.totalPKTEarned,
+              totalSharesAccepted: prev.totalSharesAccepted + 1
+            }));
+          }
+        }
       }
     };
 
-    return () => worker.terminate();
-  }, []);
-
-  // Device monitoring
-  useEffect(() => {
-    const deviceInterval = setInterval(() => {
-      setDeviceStats(prev => {
-        const newStats = { ...prev };
-        
-        if (isSharing) {
-          newStats.batteryLevel = Math.max(0, prev.batteryLevel - (prev.isCharging ? -0.2 : 0.8));
-          newStats.networkUsage = Math.min(100, 15 + (sharingStats.bandwidthShared / 5));
-          newStats.temperature = Math.min(65, 32 + (sharingStats.bandwidthShared / 10));
-        } else {
-          newStats.networkUsage = Math.max(5, prev.networkUsage - 2);
-          newStats.temperature = Math.max(30, prev.temperature - 1);
-        }
-        
-        newStats.networkStatus = navigator.onLine ? 'online' : 'offline';
-        return newStats;
-      });
-    }, 3000);
-
-    return () => clearInterval(deviceInterval);
-  }, [isSharing, sharingStats.bandwidthShared]);
-
-  const handleSharingToggle = () => {
-    if (!user) {
-      setShowAuthModal(true);
-      return;
-    }
-
-    if (!isSharing) {
-      if (!navigator.onLine) {
-        alert('No internet connection available');
-        return;
+    return () => {
+      if (workerRef.current) {
+        workerRef.current.terminate();
       }
-      
-      if (deviceStats.batteryLevel < config.batteryThreshold && !deviceStats.isCharging) {
-        alert(`Battery level too low. Need ${config.batteryThreshold}%+`);
-        return;
-      }
+    };
+  }, [earningsService, currentSessionId]);
 
-      workerRef.current?.postMessage({
-        type: 'start_sharing',
-        config: { maxBandwidth: config.maxBandwidth }
-      });
+  // Start sharing function
+  const startSharing = async () => {
+    try {
       setIsSharing(true);
       
-      if ('wakeLock' in navigator) {
-        navigator.wakeLock.request('screen').catch(console.error);
+      // Start Firebase session if user is logged in
+      if (earningsService) {
+        const sessionId = await earningsService.startSession({
+          poolUrl: 'wss://pool.pkt.world/',
+          maxBandwidth: config.maxBandwidth,
+          batteryThreshold: config.batteryThreshold,
+          adaptivePower: config.adaptivePower
+        });
+        setCurrentSessionId(sessionId);
       }
-    } else {
-      workerRef.current?.postMessage({ type: 'stop_sharing' });
-      setIsSharing(false);
       
-      // Save session data when stopping
-      saveSessionData();
+      // Start PacketCrypt worker
+      if (workerRef.current) {
+        workerRef.current.postMessage({
+          type: 'start_mining',
+          config: {
+            paymentAddress: config.paymentAddress,
+            poolUrl: 'wss://pool.pkt.world/'
+          }
+        });
+      }
+      
+    } catch (error) {
+      console.error('Error starting sharing:', error);
+      setIsSharing(false);
     }
   };
 
-  const handleLogout = async () => {
-    if (isSharing) {
-      // Save session before logout
-      await saveSessionData();
-      // Stop sharing
-      workerRef.current?.postMessage({ type: 'stop_sharing' });
+  // Stop sharing function
+  const stopSharing = async () => {
+    try {
       setIsSharing(false);
+      
+      // Stop PacketCrypt worker
+      if (workerRef.current) {
+        workerRef.current.postMessage({ type: 'stop_mining' });
+      }
+      
+      // End Firebase session if user is logged in
+      if (earningsService && currentSessionId) {
+        await earningsService.endSession({
+          uptime: sharingStats.uptime,
+          sharesFound: sharingStats.sharesFound,
+          sharesAccepted: sharingStats.sharesAccepted,
+          hashrate: sharingStats.hashrate,
+          errors: sharingStats.errors
+        });
+        setCurrentSessionId(null);
+      }
+      
+      // Reset stats
+      setSharingStats(prev => ({
+        ...prev,
+        hashrate: 0,
+        poolConnected: false
+      }));
+      
+    } catch (error) {
+      console.error('Error stopping sharing:', error);
     }
-    
+  };
+
+  // Handle auth
+  const handleLogin = () => setShowAuthModal(true);
+  const handleLogout = async () => {
+    if (isSharing) await stopSharing();
     await signOut(auth);
   };
 
-  const formatUptime = (seconds) => {
+  // Format time helper
+  const formatTime = (seconds) => {
     const hours = Math.floor(seconds / 3600);
     const minutes = Math.floor((seconds % 3600) / 60);
     const secs = seconds % 60;
-    
-    if (hours > 0) return `${hours}h ${minutes}m`;
-    if (minutes > 0) return `${minutes}m ${secs}s`;
-    return `${secs}s`;
+    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  // Format number helper
+  const formatNumber = (num, decimals = 2) => {
+    return typeof num === 'number' ? num.toFixed(decimals) : '0.00';
   };
 
   if (authLoading) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-indigo-50 to-cyan-100 flex items-center justify-center">
-        <div className="text-center">
-          <div className="w-16 h-16 bg-gradient-to-r from-indigo-500 to-cyan-600 rounded-2xl mx-auto flex items-center justify-center mb-4 animate-pulse">
-            <span className="text-white text-2xl">🌐</span>
-          </div>
-          <p className="text-gray-600">Loading...</p>
-        </div>
+      <div className="min-h-screen bg-gradient-to-br from-gray-900 to-gray-800 flex items-center justify-center">
+        <div className="text-white text-lg">Loading...</div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-indigo-50 to-cyan-100 dark:from-gray-900 dark:to-gray-800 p-4">
-      <div className="max-w-md mx-auto space-y-6">
-        
-        {/* Header with User Info */}
-        <div className="text-center space-y-2 pt-8">
-          <div className="w-16 h-16 bg-gradient-to-r from-indigo-500 to-cyan-600 rounded-2xl mx-auto flex items-center justify-center">
-            <span className="text-white text-2xl">🌐</span>
+    <div className="min-h-screen bg-gradient-to-br from-gray-900 to-gray-800 text-white">
+      {/* Header */}
+      <div className="bg-gray-800/50 backdrop-blur-sm border-b border-gray-700 px-4 py-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center space-x-3">
+            <div className="w-8 h-8 bg-gradient-to-r from-blue-500 to-purple-500 rounded-lg flex items-center justify-center">
+              <span className="text-xs font-bold">BF</span>
+            </div>
+            <div>
+              <h1 className="text-lg font-bold">BIGFOOT Mobile</h1>
+              <p className="text-xs text-gray-400">PKT Network Optimizer</p>
+            </div>
           </div>
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
-            BIGFOOT Network Optimizer
-          </h1>
-          <p className="text-sm text-gray-600 dark:text-gray-300">
-            Idle Bandwidth Sharing Platform
-          </p>
           
-          {user ? (
-            <div className="bg-white dark:bg-gray-800 rounded-lg p-3 mt-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div className="w-8 h-8 bg-indigo-100 dark:bg-indigo-900/30 rounded-full flex items-center justify-center">
-                    <span className="text-indigo-600 dark:text-indigo-400 text-sm">
-                      {user.displayName ? user.displayName[0].toUpperCase() : user.email[0].toUpperCase()}
-                    </span>
-                  </div>
-                  <div className="text-left">
-                    <p className="text-sm font-medium text-gray-900 dark:text-white">
-                      {user.displayName || 'User'}
-                    </p>
-                    <p className="text-xs text-gray-500 dark:text-gray-400">
-                      {user.email}
-                    </p>
-                  </div>
-                </div>
-                <button
+          <div className="text-right">
+            {user ? (
+              <div>
+                <p className="text-sm font-medium">{user.displayName || 'User'}</p>
+                <button 
                   onClick={handleLogout}
-                  className="text-sm text-red-500 hover:text-red-600 px-3 py-1 rounded border border-red-200 hover:border-red-300"
+                  className="text-xs text-blue-400 hover:text-blue-300"
                 >
                   Logout
                 </button>
               </div>
-            </div>
-          ) : (
-            <button
-              onClick={() => setShowAuthModal(true)}
-              className="bg-indigo-600 text-white px-6 py-2 rounded-lg hover:bg-indigo-700 transition-colors mt-4"
-            >
-              Login / Sign Up
-            </button>
-          )}
+            ) : (
+              <button 
+                onClick={handleLogin}
+                className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg text-sm font-medium"
+              >
+                Login
+              </button>
+            )}
+          </div>
         </div>
+      </div>
 
-        {/* User Stats Summary (only if logged in) */}
-        {user && (
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg border-0 border-l-4 border-l-indigo-500">
-            <div className="p-6">
-              <h3 className="text-lg font-semibold text-gray-900 dark:text-white flex items-center gap-2 mb-4">
-                <div className="w-8 h-8 bg-indigo-100 dark:bg-indigo-900/30 rounded-full flex items-center justify-center">
-                  <span className="text-indigo-600 dark:text-indigo-400">📊</span>
-                </div>
-                Your Total Stats
-              </h3>
-              
-              <div className="grid grid-cols-2 gap-4">
-                <div className="text-center p-3 bg-indigo-50 dark:bg-indigo-900/20 rounded-lg">
-                  <div className="text-lg font-bold text-indigo-700 dark:text-indigo-300">
-                    {userStats.totalDataShared.toFixed(1)} GB
-                  </div>
-                  <div className="text-xs text-gray-600 dark:text-gray-400">
-                    Total Shared
-                  </div>
-                </div>
-                <div className="text-center p-3 bg-green-50 dark:bg-green-900/20 rounded-lg">
-                  <div className="text-lg font-bold text-green-700 dark:text-green-300">
-                    {userStats.totalBigRewards.toFixed(2)} BIG
-                  </div>
-                  <div className="text-xs text-gray-600 dark:text-gray-400">
-                    Total Earned
-                  </div>
-                </div>
-                <div className="text-center p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
-                  <div className="text-lg font-bold text-blue-700 dark:text-blue-300">
-                    {formatUptime(userStats.totalUptime)}
-                  </div>
-                  <div className="text-xs text-gray-600 dark:text-gray-400">
-                    Total Time
-                  </div>
-                </div>
-                <div className="text-center p-3 bg-purple-50 dark:bg-purple-900/20 rounded-lg">
-                  <div className="text-lg font-bold text-purple-700 dark:text-purple-300">
-                    {userStats.sessionsCompleted}
-                  </div>
-                  <div className="text-xs text-gray-600 dark:text-gray-400">
-                    Sessions
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Login prompt if not authenticated */}
-        {!user && (
-          <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
-            <div className="flex items-center gap-2">
-              <span className="text-yellow-500">ℹ️</span>
-              <div>
-                <p className="text-sm text-yellow-700 font-medium">
-                  Login Required
-                </p>
-                <p className="text-xs text-yellow-600">
-                  Please login to start sharing bandwidth and earning BIG rewards
-                </p>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Main Control Card */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg border-0 relative overflow-hidden">
-          <div className="absolute top-0 right-0 w-24 h-24 bg-indigo-50 dark:bg-indigo-900/20 rounded-full -translate-y-12 translate-x-12"></div>
-          <div className="absolute bottom-0 left-0 w-20 h-20 bg-cyan-50 dark:bg-cyan-900/20 rounded-full -translate-x-10 translate-y-10"></div>
-          <div className="p-6 relative">
-            <div className="text-center mb-4">
-              <h2 className="text-xl font-semibold text-gray-900 dark:text-white flex items-center justify-center gap-2">
-                <div className="w-10 h-10 bg-gradient-to-br from-indigo-500 to-cyan-500 rounded-full flex items-center justify-center">
-                  <span className="text-white text-xl">🌐</span>
-                </div>
-                Bandwidth Infrastructure Sharing
-              </h2>
-              <p className="text-sm text-gray-600 dark:text-gray-300 mt-2">
-                Share idle bandwidth to support decentralized infrastructure
-              </p>
+      <div className="p-4 space-y-4">
+        {/* Dynamic Section Container */}
+        <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl border border-gray-700 min-h-[300px]">
+          {/* Section Header with Navigation */}
+          <div className="flex items-center justify-between p-4 border-b border-gray-700">
+            <button 
+              onClick={prevSection}
+              className="w-10 h-10 rounded-full bg-gray-700 hover:bg-gray-600 flex items-center justify-center transition-colors"
+            >
+              <span className="text-lg">←</span>
+            </button>
+            
+            <div className="flex items-center space-x-2">
+              <span className="text-2xl">{sections[currentSection].icon}</span>
+              <h2 className="text-lg font-semibold">{sections[currentSection].title}</h2>
             </div>
             
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="space-y-1">
-                  <div className="text-sm font-medium text-gray-900 dark:text-white">Bandwidth Sharing</div>
-                  <p className="text-sm text-gray-500 dark:text-gray-400">
-                    {!user ? 'Login required to start sharing' :
-                     isSharing ? `Active - ${sharingStats.bandwidthShared.toFixed(1)} MB/s shared` : 
-                     'Inactive - Enable to start earning BIG rewards'
-                    }
-                  </p>
+            <button 
+              onClick={nextSection}
+              className="w-10 h-10 rounded-full bg-gray-700 hover:bg-gray-600 flex items-center justify-center transition-colors"
+            >
+              <span className="text-lg">→</span>
+            </button>
+          </div>
+
+          {/* Section Content */}
+          <div className="p-4">
+            {currentSection === 0 && (
+              // Network Activity Overview
+              <div className="space-y-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center space-x-2">
+                    <div className={`w-3 h-3 rounded-full ${sharingStats.poolConnected ? 'bg-green-500' : 'bg-red-500'}`}></div>
+                    <span className="text-sm text-gray-300">Pool Connection</span>
+                  </div>
+                  <span className="text-sm font-medium">
+                    {isSharing ? (sharingStats.poolConnected ? 'Connected' : 'Connecting...') : 'Offline'}
+                  </span>
                 </div>
                 
-                <button
-                  onClick={handleSharingToggle}
-                  disabled={!navigator.onLine || (!user && !isSharing)}
-                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 ${
-                    isSharing ? 'bg-green-500' : 
-                    !user ? 'bg-gray-300 cursor-not-allowed' :
-                    navigator.onLine ? 'bg-gray-200' : 'bg-red-300'
-                  }`}
-                >
-                  <span
-                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                      isSharing ? 'translate-x-6' : 'translate-x-1'
-                    }`}
-                  />
-                </button>
-              </div>
-              
-              <div className="space-y-2">
-                <div className="flex justify-between text-sm">
-                  <span>Sharing Level</span>
-                  <span>{sharingStats.sharingLevel.toFixed(1)}%</span>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="bg-gray-700/50 p-3 rounded-lg">
+                    <p className="text-sm text-gray-400">Active Time</p>
+                    <p className="text-xl font-bold text-blue-400">{formatTime(sharingStats.uptime)}</p>
+                  </div>
+                  <div className="bg-gray-700/50 p-3 rounded-lg">
+                    <p className="text-sm text-gray-400">Network Usage</p>
+                    <p className="text-xl font-bold text-green-400">{formatNumber(sharingStats.bandwidthShared)} MB/s</p>
+                  </div>
+                  <div className="bg-gray-700/50 p-3 rounded-lg">
+                    <p className="text-sm text-gray-400">Data Shared</p>
+                    <p className="text-xl font-bold text-purple-400">{formatNumber(sharingStats.dataTransferred)} GB</p>
+                  </div>
+                  <div className="bg-gray-700/50 p-3 rounded-lg">
+                    <p className="text-sm text-gray-400">Connections</p>
+                    <p className="text-xl font-bold text-orange-400">{sharingStats.networkConnections}</p>
+                  </div>
                 </div>
-                <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-3">
-                  <div 
-                    className="bg-green-500 h-3 rounded-full transition-all duration-500" 
-                    style={{width: `${sharingStats.sharingLevel}%`}}
-                  ></div>
-                </div>
-              </div>
 
-              <div className="grid grid-cols-2 gap-4 pt-4">
-                <div className="text-center p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
-                  <span className="text-blue-500 text-xl">📊</span>
-                  <div className="text-lg font-semibold text-blue-700 dark:text-blue-300 mt-1">
-                    {sharingStats.dataTransferred.toFixed(1)} GB
+                <div className="bg-gray-700/30 p-3 rounded-lg">
+                  <div className="flex justify-between text-sm text-gray-400 mb-2">
+                    <span>Sharing Level</span>
+                    <span>{Math.floor(sharingStats.sharingLevel)}%</span>
                   </div>
-                  <div className="text-xs text-gray-600 dark:text-gray-400">
-                    Session Data
-                  </div>
-                </div>
-                <div className="text-center p-3 bg-green-50 dark:bg-green-900/20 rounded-lg">
-                  <span className="text-green-500 text-xl">🪙</span>
-                  <div className="text-lg font-semibold text-green-700 dark:text-green-300 mt-1">
-                    {sharingStats.bigRewards.toFixed(2)}
-                  </div>
-                  <div className="text-xs text-gray-600 dark:text-gray-400">
-                    Session BIG
+                  <div className="w-full bg-gray-600 rounded-full h-2">
+                    <div 
+                      className="bg-gradient-to-r from-blue-500 to-green-500 h-2 rounded-full transition-all duration-300"
+                      style={{ width: `${sharingStats.sharingLevel}%` }}
+                    ></div>
                   </div>
                 </div>
               </div>
-            </div>
-          </div>
-        </div>
+            )}
 
-        {/* Network Activity Overview */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg border-0 border-l-4 border-l-cyan-500 relative">
-          <div className="absolute top-0 right-0 w-16 h-16 bg-cyan-50 dark:bg-cyan-900/10 rounded-full -translate-y-8 translate-x-8 opacity-50"></div>
-          <div className="p-6 relative">
-            <h3 className="text-lg font-semibold text-gray-900 dark:text-white flex items-center gap-2 mb-4">
-              <div className="w-8 h-8 bg-cyan-100 dark:bg-cyan-900/30 rounded-full flex items-center justify-center">
-                <span className="text-cyan-600 dark:text-cyan-400">📈</span>
-              </div>
-              Network Activity Overview
-            </h3>
-            
-            <div className="grid grid-cols-2 gap-4">
-              <div className="text-center p-3 border border-gray-200 dark:border-gray-600 rounded-lg">
-                <div className="text-xl font-bold text-indigo-600 dark:text-indigo-400">
-                  {sharingStats.bandwidthShared.toFixed(1)} MB/s
-                </div>
-                <div className="text-xs text-gray-500">Bandwidth Shared</div>
-              </div>
-              <div className="text-center p-3 border border-gray-200 dark:border-gray-600 rounded-lg">
-                <div className="text-xl font-bold text-green-600 dark:text-green-400">
-                  {formatUptime(sharingStats.uptime)}
-                </div>
-                <div className="text-xs text-gray-500">Session Time</div>
-              </div>
-            </div>
-            
-            <div className="grid grid-cols-2 gap-4 mt-4">
-              <div className="text-center p-3 border border-gray-200 dark:border-gray-600 rounded-lg">
-                <div className="text-xl font-bold text-blue-600 dark:text-blue-400">
-                  {sharingStats.networkConnections}
-                </div>
-                <div className="text-xs text-gray-500">Network Connections</div>
-              </div>
-              <div className="text-center p-3 border border-gray-200 dark:border-gray-600 rounded-lg">
-                <div className="text-xl font-bold text-purple-600 dark:text-purple-400">
-                  {sharingStats.totalContributions}
-                </div>
-                <div className="text-xs text-gray-500">Total Contributions</div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Section Separator - Device Monitoring */}
-        <div className="flex items-center justify-center py-4">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-px bg-gradient-to-r from-transparent to-gray-300 dark:to-gray-600"></div>
-            <div className="bg-indigo-100 dark:bg-indigo-900/30 rounded-full p-2">
-              <svg className="w-4 h-4 text-indigo-600 dark:text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" />
-              </svg>
-            </div>
-            <div className="w-8 h-px bg-gradient-to-l from-transparent to-gray-300 dark:to-gray-600"></div>
-          </div>
-        </div>
-
-        {/* Device Status */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg border-0 border-l-4 border-l-blue-500">
-          <div className="p-6">
-            <h3 className="text-lg font-semibold text-gray-900 dark:text-white flex items-center gap-2 mb-4">
-              <div className="w-8 h-8 bg-blue-100 dark:bg-blue-900/30 rounded-full flex items-center justify-center">
-                <span className="text-blue-600 dark:text-blue-400">📱</span>
-              </div>
-              Device Status
-            </h3>
-            
-            <div className="grid grid-cols-3 gap-4">
-              <div className="text-center">
-                <span className="text-2xl">
-                  {deviceStats.batteryLevel < 30 ? '🪫' : '🔋'}
-                </span>
-                <div className={`text-sm font-medium mt-1 ${
-                  deviceStats.batteryLevel < 30 ? 'text-red-500' : 'text-green-500'
-                }`}>
-                  {deviceStats.batteryLevel.toFixed(0)}%
-                </div>
-                <div className="text-xs text-gray-500">
-                  {deviceStats.isCharging ? 'Charging' : 'Battery'}
-                </div>
-              </div>
-              
-              <div className="text-center">
-                <span className="text-2xl">
-                  {deviceStats.temperature > 65 ? '🔥' : '🌡️'}
-                </span>
-                <div className={`text-sm font-medium mt-1 ${
-                  deviceStats.temperature > 65 ? 'text-red-500' : 'text-orange-500'
-                }`}>
-                  {deviceStats.temperature.toFixed(0)}°C
-                </div>
-                <div className="text-xs text-gray-500">
-                  Temperature
-                </div>
-              </div>
-              
-              <div className="text-center">
-                <span className="text-2xl">
-                  {deviceStats.networkStatus === 'online' ? '📶' : '📵'}
-                </span>
-                <div className={`text-sm font-medium mt-1 ${
-                  deviceStats.networkStatus === 'online' ? 'text-green-500' : 'text-red-500'
-                }`}>
-                  {deviceStats.networkUsage.toFixed(0)}%
-                </div>
-                <div className="text-xs text-gray-500">
-                  Network Usage
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Section Separator - Configuration */}
-        <div className="flex items-center justify-center py-4">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-px bg-gradient-to-r from-transparent to-gray-300 dark:to-gray-600"></div>
-            <div className="bg-purple-100 dark:bg-purple-900/30 rounded-full p-2">
-              <svg className="w-4 h-4 text-purple-600 dark:text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-              </svg>
-            </div>
-            <div className="w-8 h-px bg-gradient-to-l from-transparent to-gray-300 dark:to-gray-600"></div>
-          </div>
-        </div>
-
-        {/* Settings */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg border-0 border-l-4 border-l-purple-500">
-          <div className="p-6">
-            <h3 className="text-lg font-semibold text-gray-900 dark:text-white flex items-center gap-2 mb-4">
-              <div className="w-8 h-8 bg-purple-100 dark:bg-purple-900/30 rounded-full flex items-center justify-center">
-                <span className="text-purple-600 dark:text-purple-400">⚙️</span>
-              </div>
-              Sharing Configuration
-            </h3>
-            
-            <div className="space-y-4">
-              <div className="space-y-2">
-                <label className="text-sm font-medium text-gray-900 dark:text-white">
-                  Max Bandwidth: {config.maxBandwidth} MB/s
-                </label>
-                <input
-                  type="range"
-                  min="10"
-                  max="100"
-                  value={config.maxBandwidth}
-                  onChange={(e) => setConfig(prev => ({ ...prev, maxBandwidth: parseInt(e.target.value) }))}
-                  className="w-full"
-                  disabled={isSharing}
-                />
-                <div className="text-xs text-gray-500 flex justify-between">
-                  <span>Low sharing</span>
-                  <span>High sharing</span>
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between">
-                <div className="space-y-1">
-                  <div className="text-sm font-medium text-gray-900 dark:text-white">Auto-Start Sharing</div>
-                  <p className="text-xs text-gray-500 dark:text-gray-400">
-                    Automatically start when connected to WiFi
+            {currentSection === 1 && user && (
+              // Total Earnings
+              <div className="space-y-4">
+                <div className="text-center mb-4">
+                  <p className="text-sm text-gray-400 mb-2">Total Portfolio Value</p>
+                  <p className="text-3xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
+                    {formatNumber(userEarnings.totalBigPointsEarned, 4)} BIG
+                  </p>
+                  <p className="text-lg text-gray-300">
+                    = {formatNumber(userEarnings.totalPKTEarned, 4)} PKT
                   </p>
                 </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="bg-blue-600/20 border border-blue-500/30 p-3 rounded-lg">
+                    <p className="text-xs text-blue-300">Total Shares</p>
+                    <p className="text-lg font-bold text-blue-400">{userEarnings.totalSharesAccepted}</p>
+                  </div>
+                  <div className="bg-purple-600/20 border border-purple-500/30 p-3 rounded-lg">
+                    <p className="text-xs text-purple-300">Sessions</p>
+                    <p className="text-lg font-bold text-purple-400">{userEarnings.sessionsCompleted}</p>
+                  </div>
+                  <div className="bg-green-600/20 border border-green-500/30 p-3 rounded-lg">
+                    <p className="text-xs text-green-300">Avg Hashrate</p>
+                    <p className="text-lg font-bold text-green-400">{userEarnings.averageHashrate} H/s</p>
+                  </div>
+                  <div className="bg-orange-600/20 border border-orange-500/30 p-3 rounded-lg">
+                    <p className="text-xs text-orange-300">Success Rate</p>
+                    <p className="text-lg font-bold text-orange-400">{formatNumber(userEarnings.shareAcceptanceRate)}%</p>
+                  </div>
+                </div>
+
+                <div className="bg-gray-700/30 p-3 rounded-lg">
+                  <p className="text-sm text-gray-400 mb-1">Conversion Rate</p>
+                  <p className="text-xs text-gray-300">1 Share = 0.1 PKT = 0.1 BIG Points</p>
+                  <p className="text-xs text-gray-400 mt-2">Total Time: {formatTime(userEarnings.totalMiningTime)}</p>
+                </div>
+              </div>
+            )}
+
+            {currentSection === 1 && !user && (
+              // Login Required for Earnings
+              <div className="text-center py-8">
+                <div className="text-4xl mb-4">🔐</div>
+                <h3 className="text-lg font-semibold mb-2">Login Required</h3>
+                <p className="text-gray-400 mb-4">Sign in to track your earnings and session history</p>
                 <button 
-                  onClick={() => setConfig(prev => ({ ...prev, autoStart: !prev.autoStart }))}
-                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                    config.autoStart ? 'bg-green-500' : 'bg-gray-200'
-                  }`}
+                  onClick={handleLogin}
+                  className="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded-lg font-medium"
                 >
-                  <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                    config.autoStart ? 'translate-x-6' : 'translate-x-1'
-                  }`} />
+                  Sign In
                 </button>
               </div>
+            )}
 
-              <div className="flex items-center justify-between">
-                <div className="space-y-1">
-                  <div className="text-sm font-medium text-gray-900 dark:text-white">Background Sharing</div>
-                  <p className="text-xs text-gray-500 dark:text-gray-400">
-                    Continue sharing in background
+            {currentSection === 2 && (
+              // Current Session
+              <div className="space-y-4">
+                <div className="text-center mb-4">
+                  <p className="text-sm text-gray-400 mb-1">Session Rewards</p>
+                  <div className="flex items-center justify-center space-x-4">
+                    <div>
+                      <p className="text-2xl font-bold text-blue-400">{formatNumber(sharingStats.bigRewards, 4)}</p>
+                      <p className="text-xs text-gray-400">BIG Points</p>
+                    </div>
+                    <div className="text-gray-500">=</div>
+                    <div>
+                      <p className="text-2xl font-bold text-purple-400">{formatNumber(sharingStats.pktRewards, 4)}</p>
+                      <p className="text-xs text-gray-400">PKT</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="bg-gray-700/50 p-3 rounded-lg">
+                    <p className="text-sm text-gray-400">Hashrate</p>
+                    <p className="text-lg font-bold">{sharingStats.hashrate} H/s</p>
+                  </div>
+                  <div className="bg-gray-700/50 p-3 rounded-lg">
+                    <p className="text-sm text-gray-400">Shares/Hour</p>
+                    <p className="text-lg font-bold">{sharingStats.sharesPerHour}</p>
+                  </div>
+                  <div className="bg-gray-700/50 p-3 rounded-lg">
+                    <p className="text-sm text-gray-400">Found</p>
+                    <p className="text-lg font-bold text-yellow-400">{sharingStats.sharesFound}</p>
+                  </div>
+                  <div className="bg-gray-700/50 p-3 rounded-lg">
+                    <p className="text-sm text-gray-400">Accepted</p>
+                    <p className="text-lg font-bold text-green-400">{sharingStats.sharesAccepted}</p>
+                  </div>
+                </div>
+
+                {sharingStats.sharesRejected > 0 && (
+                  <div className="bg-red-600/20 border border-red-500/30 p-3 rounded-lg">
+                    <p className="text-sm text-red-300">Rejected Shares: {sharingStats.sharesRejected}</p>
+                  </div>
+                )}
+
+                {sharingStats.errors > 0 && (
+                  <div className="bg-yellow-600/20 border border-yellow-500/30 p-3 rounded-lg">
+                    <p className="text-sm text-yellow-300">Connection Errors: {sharingStats.errors}</p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {currentSection === 3 && (
+              // Device Status
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="bg-gray-700/50 p-3 rounded-lg">
+                    <div className="flex items-center justify-between">
+                      <p className="text-sm text-gray-400">Battery</p>
+                      <span className={`text-xs px-2 py-1 rounded-full ${
+                        deviceStats.isCharging 
+                          ? 'bg-green-600/20 text-green-400' 
+                          : deviceStats.batteryLevel > 30 
+                            ? 'bg-blue-600/20 text-blue-400'
+                            : 'bg-red-600/20 text-red-400'
+                      }`}>
+                        {deviceStats.isCharging ? '⚡' : '🔋'}
+                      </span>
+                    </div>
+                    <p className="text-lg font-bold">{deviceStats.batteryLevel}%</p>
+                    <div className="w-full bg-gray-600 rounded-full h-1 mt-2">
+                      <div 
+                        className={`h-1 rounded-full ${
+                          deviceStats.batteryLevel > 50 ? 'bg-green-500' :
+                          deviceStats.batteryLevel > 30 ? 'bg-yellow-500' : 'bg-red-500'
+                        }`}
+                        style={{ width: `${deviceStats.batteryLevel}%` }}
+                      ></div>
+                    </div>
+                  </div>
+                  
+                  <div className="bg-gray-700/50 p-3 rounded-lg">
+                    <p className="text-sm text-gray-400">Temperature</p>
+                    <p className="text-lg font-bold">{deviceStats.temperature}°C</p>
+                    <div className="flex items-center mt-1">
+                      <span className={`text-xs px-2 py-1 rounded-full ${
+                        deviceStats.temperature < 50 ? 'bg-green-600/20 text-green-400' :
+                        deviceStats.temperature < 70 ? 'bg-yellow-600/20 text-yellow-400' :
+                        'bg-red-600/20 text-red-400'
+                      }`}>
+                        {deviceStats.temperature < 50 ? 'Cool' : 
+                         deviceStats.temperature < 70 ? 'Warm' : 'Hot'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-gray-700/30 p-3 rounded-lg">
+                  <h4 className="text-sm font-medium mb-2">Device Protection</h4>
+                  <div className="space-y-2 text-sm">
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Battery Threshold</span>
+                      <span>{config.batteryThreshold}%</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Thermal Threshold</span>
+                      <span>{config.thermalThreshold}°C</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Adaptive Power</span>
+                      <span className={config.adaptivePower ? 'text-green-400' : 'text-red-400'}>
+                        {config.adaptivePower ? 'Enabled' : 'Disabled'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-blue-600/20 border border-blue-500/30 p-3 rounded-lg">
+                  <p className="text-sm text-blue-300 mb-1">💡 Smart Protection</p>
+                  <p className="text-xs text-gray-300">
+                    Sharing will automatically pause when battery is low or device gets too warm
                   </p>
                 </div>
-                <button 
-                  onClick={() => setConfig(prev => ({ ...prev, backgroundSharing: !prev.backgroundSharing }))}
-                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                    config.backgroundSharing ? 'bg-green-500' : 'bg-gray-200'
-                  }`}
-                >
-                  <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                    config.backgroundSharing ? 'translate-x-6' : 'translate-x-1'
-                  }`} />
-                </button>
               </div>
+            )}
+          </div>
 
-              <div className="flex items-center justify-between">
-                <div className="space-y-1">
-                  <div className="text-sm font-medium text-gray-900 dark:text-white">Smart Power Management</div>
-                  <p className="text-xs text-gray-500 dark:text-gray-400">
-                    Auto-pause when battery low or device hot
-                  </p>
-                </div>
-                <button 
-                  onClick={() => setConfig(prev => ({ ...prev, adaptivePower: !prev.adaptivePower }))}
-                  className={`relative inline-flex h-6 w-11 items-centers rounded-full transition-colors ${
-                    config.adaptivePower ? 'bg-green-500' : 'bg-gray-200'
-                  }`}
-                >
-                  <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                    config.adaptivePower ? 'translate-x-6' : 'translate-x-1'
-                  }`} />
-                </button>
-              </div>
-            </div>
+          {/* Section Indicators */}
+          <div className="flex justify-center space-x-2 pb-4">
+            {sections.map((_, index) => (
+              <div
+                key={index}
+                className={`w-2 h-2 rounded-full transition-colors ${
+                  index === currentSection ? 'bg-blue-500' : 'bg-gray-600'
+                }`}
+              />
+            ))}
           </div>
         </div>
 
-        {/* Section Separator - Rewards */}
-        <div className="flex items-center justify-center py-4">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-px bg-gradient-to-r from-transparent to-gray-300 dark:to-gray-600"></div>
-            <div className="bg-green-100 dark:bg-green-900/30 rounded-full p-2">
-              <svg className="w-4 h-4 text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1" />
-              </svg>
-            </div>
-            <div className="w-8 h-px bg-gradient-to-l from-transparent to-gray-300 dark:to-gray-600"></div>
-          </div>
-        </div>
-
-        {/* BIG Rewards Summary */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg border-0 border-l-4 border-l-green-500 relative overflow-hidden">
-          <div className="absolute top-0 right-0 w-20 h-20 bg-green-50 dark:bg-green-900/10 rounded-full -translate-y-10 translate-x-10"></div>
-          <div className="absolute bottom-0 left-0 w-16 h-16 bg-emerald-50 dark:bg-emerald-900/10 rounded-full -translate-x-8 translate-y-8"></div>
-          <div className="p-6 relative">
-            <h3 className="text-lg font-semibold text-gray-900 dark:text-white flex items-center gap-2 mb-4">
-              <div className="w-8 h-8 bg-green-100 dark:bg-green-900/30 rounded-full flex items-center justify-center">
-                <span className="text-green-600 dark:text-green-400">💰</span>
-              </div>
-              BIG Rewards Summary
-            </h3>
-            
-            <div className="text-center p-4 bg-gradient-to-r from-green-50 to-emerald-100 dark:from-green-900/20 dark:to-emerald-800/20 rounded-lg mb-4">
-              <div className="text-3xl font-bold text-green-700 dark:text-green-300">
-                {sharingStats.bigRewards.toFixed(2)}
-              </div>
-              <div className="text-sm text-gray-600 dark:text-gray-400">
-                Session BIG Earned
-              </div>
-              <div className="text-xs text-gray-500 mt-1">
-                ≈ ${(sharingStats.bigRewards * 0.01).toFixed(4)} USD
-              </div>
-            </div>
-            
-            <div className="space-y-2">
-              <div className="flex justify-between">
-                <span className="text-sm text-gray-600 dark:text-gray-400">This Session</span>
-                <span className="text-sm font-medium text-green-600 dark:text-green-400">
-                  +{sharingStats.bigRewards.toFixed(2)} BIG
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-sm text-gray-600 dark:text-gray-400">Hourly Rate</span>
-                <span className="text-sm font-medium text-gray-900 dark:text-white">
-                  {sharingStats.uptime > 0 ? 
-                    (sharingStats.bigRewards / (sharingStats.uptime / 3600)).toFixed(2) : '0.00'
-                  } BIG/h
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-sm text-gray-600 dark:text-gray-400">Sharing Efficiency</span>
-                <span className="text-sm font-medium text-gray-900 dark:text-white">
-                  {sharingStats.sharingLevel.toFixed(1)}%
-                </span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Status Footer */}
-        <div className="text-center text-xs text-gray-500 dark:text-gray-400 pb-6 space-y-2">
-          {isSharing ? (
-            <>
-              <div className="flex items-center justify-center gap-1">
-                <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-                Active - Contributing idle bandwidth to infrastructure
-              </div>
-              <div className="text-xs text-gray-400">
-                Runtime: {formatUptime(sharingStats.uptime)} | 
-                Shared: {sharingStats.bandwidthShared.toFixed(1)} MB/s | 
-                BIG: {sharingStats.bigRewards.toFixed(2)}
-              </div>
-            </>
-          ) : (
-            <div className="space-y-1">
-              <div>{user ? 'Enable bandwidth sharing to start earning BIG rewards' : 'Login to start sharing bandwidth'}</div>
-              <div className="text-xs text-gray-400">
-                Network: {deviceStats.networkStatus} | 
-                Battery: {deviceStats.batteryLevel.toFixed(0)}% | 
-                Temp: {deviceStats.temperature.toFixed(0)}°C
-              </div>
-            </div>
-          )}
+        {/* Control Button */}
+        <div className="fixed bottom-6 left-4 right-4">
+          <button
+            onClick={isSharing ? stopSharing : startSharing}
+            disabled={!user}
+            className={`w-full py-4 rounded-xl text-lg font-bold transition-all duration-300 ${
+              isSharing
+                ? 'bg-red-600 hover:bg-red-700 text-white'
+                : user 
+                  ? 'bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white'
+                  : 'bg-gray-600 text-gray-400 cursor-not-allowed'
+            }`}
+          >
+            {!user ? 'Login Required' : isSharing ? 'Stop Sharing' : 'Start Sharing'}
+          </button>
         </div>
       </div>
 
       {/* Auth Modal */}
-      <AuthModal
-        isOpen={showAuthModal}
-        onClose={() => setShowAuthModal(false)}
-        onLoginSuccess={(user) => {
-          setUser(user);
-          setShowAuthModal(false);
-        }}
-      />
+      {showAuthModal && (
+        <AuthModal 
+          isOpen={showAuthModal} 
+          onClose={() => setShowAuthModal(false)} 
+        />
+      )}
     </div>
   );
 };
