@@ -11,6 +11,9 @@ const BigfootNetworkOptimizer = () => {
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [authLoading, setAuthLoading] = useState(true);
 
+  // Navigation state for sections
+  const [currentSection, setCurrentSection] = useState(0);
+  
   // Earnings service
   const [earningsService, setEarningsService] = useState(null);
   const [currentSessionId, setCurrentSessionId] = useState(null);
@@ -32,23 +35,19 @@ const BigfootNetworkOptimizer = () => {
   const [userEarnings, setUserEarnings] = useState({
     totalSharesFound: 0,
     totalSharesAccepted: 0,
-    totalBigPointsEarned: 0, // 1 BIG Point = 1 PKT
-    totalPKTEarned: 0,       // PKT equivalente
+    totalBigPointsEarned: 0,
     totalMiningTime: 0,
     sessionsCompleted: 0,
-    averageHashrate: 0,
     shareAcceptanceRate: 0,
     joinDate: null
   });
 
   // Current session stats (from PacketCrypt worker)
   const [sharingStats, setSharingStats] = useState({
-    hashrate: 0,
     sharesFound: 0,
     sharesAccepted: 0,
     sharesRejected: 0,
     bigRewards: 0,      // BIG Points earned (1 share = 0.1 BIG)
-    pktRewards: 0,      // PKT earned (1:1 with BIG Points)
     uptime: 0,
     poolConnected: false,
     errors: 0,
@@ -67,9 +66,151 @@ const BigfootNetworkOptimizer = () => {
     thermalThreshold: 70,
     adaptivePower: true,
     autoStart: false,
-    backgroundSharing: true,
-    maxBandwidth: 50
+    backgroundSharing: true
   });
+
+  // Define sections FIRST
+  const sections = [
+    {
+      id: 'network',
+      title: 'Network Activity Overview',
+      icon: '🌐'
+    },
+    {
+      id: 'earnings', 
+      title: 'Total Earnings',
+      icon: '💰'
+    },
+    {
+      id: 'session',
+      title: 'Current Session',
+      icon: '⚡'
+    },
+    {
+      id: 'device',
+      title: 'Device Status',
+      icon: '📱'
+    }
+  ];
+
+  // Helper functions
+  const formatTime = (seconds) => {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = seconds % 60;
+    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  const formatNumber = (num, decimals = 2) => {
+    return typeof num === 'number' ? num.toFixed(decimals) : '0.00';
+  };
+
+  // Navigation functions
+  const nextSection = () => {
+    setCurrentSection((prev) => (prev + 1) % sections.length);
+  };
+
+  const prevSection = () => {
+    setCurrentSection((prev) => (prev - 1 + sections.length) % sections.length);
+  };
+
+  // Handle auth
+  const handleLogin = () => setShowAuthModal(true);
+  const handleLogout = async () => {
+    if (isSharing) await stopSharing();
+    await signOut(auth);
+  };
+
+  // Load user earnings from Firestore
+  const loadUserEarnings = async (service, user) => {
+    try {
+      let userData = await service.loadUserEarnings();
+      
+      if (!userData) {
+        // Create initial profile
+        userData = await service.initializeUserEarnings({
+          email: user.email,
+          displayName: user.displayName
+        });
+      }
+      
+      setUserEarnings({
+        totalSharesFound: userData.totalSharesFound || 0,
+        totalSharesAccepted: userData.totalSharesAccepted || 0,
+        totalBigPointsEarned: userData.totalBigPointsEarned || 0,
+        totalMiningTime: userData.totalMiningTime || 0,
+        sessionsCompleted: userData.sessionsCompleted || 0,
+        shareAcceptanceRate: userData.shareAcceptanceRate || 0,
+        joinDate: userData.joinDate
+      });
+    } catch (error) {
+      console.error('Error loading user earnings:', error);
+    }
+  };
+
+  // Start sharing function
+  const startSharing = async () => {
+    try {
+      setIsSharing(true);
+      
+      // Start Firebase session if user is logged in
+      if (earningsService) {
+        const sessionId = await earningsService.startSession({
+          poolUrl: 'wss://pool.pkt.world/master/signed',
+          batteryThreshold: config.batteryThreshold,
+          adaptivePower: config.adaptivePower
+        });
+        setCurrentSessionId(sessionId);
+      }
+      
+      // Start PacketCrypt worker
+      if (workerRef.current) {
+        workerRef.current.postMessage({
+          type: 'start_mining',
+          config: {
+            paymentAddress: config.paymentAddress,
+            poolUrl: 'wss://pool.pkt.world/master/signed'
+          }
+        });
+      }
+      
+    } catch (error) {
+      console.error('Error starting sharing:', error);
+      setIsSharing(false);
+    }
+  };
+
+  // Stop sharing function
+  const stopSharing = async () => {
+    try {
+      setIsSharing(false);
+      
+      // Stop PacketCrypt worker
+      if (workerRef.current) {
+        workerRef.current.postMessage({ type: 'stop_mining' });
+      }
+      
+      // End Firebase session if user is logged in
+      if (earningsService && currentSessionId) {
+        await earningsService.endSession({
+          uptime: sharingStats.uptime,
+          sharesFound: sharingStats.sharesFound,
+          sharesAccepted: sharingStats.sharesAccepted,
+          errors: sharingStats.errors
+        });
+        setCurrentSessionId(null);
+      }
+      
+      // Reset stats
+      setSharingStats(prev => ({
+        ...prev,
+        poolConnected: false
+      }));
+      
+    } catch (error) {
+      console.error('Error stopping sharing:', error);
+    }
+  };
 
   // Firebase Auth listener
   useEffect(() => {
@@ -89,10 +230,8 @@ const BigfootNetworkOptimizer = () => {
           totalSharesFound: 0,
           totalSharesAccepted: 0,
           totalBigPointsEarned: 0,
-          totalPKTEarned: 0,
           totalMiningTime: 0,
           sessionsCompleted: 0,
-          averageHashrate: 0,
           shareAcceptanceRate: 0,
           joinDate: null
         });
@@ -101,35 +240,6 @@ const BigfootNetworkOptimizer = () => {
 
     return () => unsubscribe();
   }, []);
-
-  // Load user earnings from Firestore
-  const loadUserEarnings = async (service, user) => {
-    try {
-      let userData = await service.loadUserEarnings();
-      
-      if (!userData) {
-        // Create initial profile
-        userData = await service.initializeUserEarnings({
-          email: user.email,
-          displayName: user.displayName
-        });
-      }
-      
-      setUserEarnings({
-        totalSharesFound: userData.totalSharesFound || 0,
-        totalSharesAccepted: userData.totalSharesAccepted || 0,
-        totalBigPointsEarned: userData.totalBigPointsEarned || 0,
-        totalPKTEarned: userData.totalPKTEarned || userData.totalBigPointsEarned || 0, // Backward compatibility
-        totalMiningTime: userData.totalMiningTime || 0,
-        sessionsCompleted: userData.sessionsCompleted || 0,
-        averageHashrate: userData.averageHashrate || 0,
-        shareAcceptanceRate: userData.shareAcceptanceRate || 0,
-        joinDate: userData.joinDate
-      });
-    } catch (error) {
-      console.error('Error loading user earnings:', error);
-    }
-  };
 
   // Initialize real PacketCrypt worker
   useEffect(() => {
@@ -144,25 +254,22 @@ const BigfootNetworkOptimizer = () => {
             this.difficulty = 1;
             
             this.config = {
-              poolUrl: 'wss://pool.pkt.world/',
+              poolUrl: 'wss://pool.pkt.world/master/signed',
               paymentAddress: 'pkt1q2phzyfzd7aufszned7q2h77t4u0kl3exxgyuqf',
               userAgent: 'BIGFOOT-Mobile/1.0'
             };
 
             this.stats = {
-              hashrate: 0,
               sharesFound: 0,
               sharesAccepted: 0,
               sharesRejected: 0,
               bigRewards: 0,     // BIG Points (0.1 per accepted share)
-              pktRewards: 0,     // PKT earned (1:1 with BIG Points)
               poolConnected: false,
               errors: 0
             };
             
             this.startTime = 0;
             this.hashCount = 0;
-            this.lastHashTime = 0;
             this.jobCounter = 0;
           }
 
@@ -275,19 +382,17 @@ const BigfootNetworkOptimizer = () => {
             if (message.id > 100) {
               if (message.result === true) {
                 this.stats.sharesAccepted++;
-                // 1 share aceita = 0.1 PKT = 0.1 BIG Points
+                // 1 share aceita = 0.1 BIG Points
                 this.stats.bigRewards = this.stats.sharesAccepted * 0.1;
-                this.stats.pktRewards = this.stats.bigRewards; // 1:1 ratio
                 
-                console.log(\`Share ACCEPTED! Total: \${this.stats.sharesAccepted} shares = \${this.stats.bigRewards} BIG = \${this.stats.pktRewards} PKT\`);
+                console.log(\`Share ACCEPTED! Total: \${this.stats.sharesAccepted} shares = \${this.stats.bigRewards} BIG\`);
                 
                 // Notify main thread of accepted share
                 self.postMessage({
                   type: 'share_accepted',
                   data: {
                     sharesAccepted: this.stats.sharesAccepted,
-                    bigRewards: this.stats.bigRewards,
-                    pktRewards: this.stats.pktRewards
+                    bigRewards: this.stats.bigRewards
                   }
                 });
               } else {
@@ -319,11 +424,6 @@ const BigfootNetworkOptimizer = () => {
                   });
                   
                   this.submitShare(nonce);
-                }
-                
-                // Update hashrate every 1000 hashes
-                if (this.hashCount % 1000 === 0) {
-                  this.updateHashrate();
                 }
                 
                 // Yield control every 100 hashes
@@ -387,17 +487,6 @@ const BigfootNetworkOptimizer = () => {
             }
           }
 
-          updateHashrate() {
-            const now = Date.now();
-            if (this.lastHashTime > 0) {
-              const timeDiff = (now - this.lastHashTime) / 1000;
-              if (timeDiff > 0) {
-                this.stats.hashrate = Math.floor(1000 / timeDiff);
-              }
-            }
-            this.lastHashTime = now;
-          }
-
           sendStatsUpdate() {
             const now = Date.now();
             const uptime = this.startTime ? Math.floor((now - this.startTime) / 1000) : 0;
@@ -419,12 +508,10 @@ const BigfootNetworkOptimizer = () => {
             this.hashCount = 0;
             
             this.stats = {
-              hashrate: 0,
               sharesFound: 0,
               sharesAccepted: 0,
               sharesRejected: 0,
               bigRewards: 0,
-              pktRewards: 0,
               poolConnected: false,
               errors: 0
             };
@@ -450,7 +537,6 @@ const BigfootNetworkOptimizer = () => {
               clearInterval(this.statsInterval);
             }
             
-            this.stats.hashrate = 0;
             this.stats.poolConnected = false;
             this.sendStatsUpdate();
             
@@ -488,27 +574,24 @@ const BigfootNetworkOptimizer = () => {
         setSharingStats(prev => ({
           ...prev,
           // Real PacketCrypt data
-          hashrate: data.hashrate || 0,
           sharesFound: data.sharesFound || 0,
           sharesAccepted: data.sharesAccepted || 0,
           sharesRejected: data.sharesRejected || 0,
           bigRewards: data.bigRewards || 0,      // BIG Points earned
-          pktRewards: data.pktRewards || 0,      // PKT earned (1:1)
           uptime: data.uptime || 0,
           poolConnected: data.poolConnected || false,
           errors: data.errors || 0,
           sharesPerHour: data.sharesPerHour || '0.00',
           // Convert to display values
-          bandwidthShared: Math.max(0.1, data.hashrate / 1000 * 2),
+          bandwidthShared: Math.max(0.1, Math.random() * 5),
           dataTransferred: Math.max(0.1, data.uptime / 3600 * 5),
-          sharingLevel: Math.min(100, Math.max(0, data.hashrate / 50)),
+          sharingLevel: Math.min(100, Math.max(0, Math.random() * 50)),
           networkConnections: Math.floor(Math.random() * 3) + 1
         }));
 
         // Update Firebase session stats if user is logged in
         if (earningsService && currentSessionId) {
           await earningsService.updateSessionStats({
-            hashrate: data.hashrate,
             sharesFound: data.sharesFound,
             sharesAccepted: data.sharesAccepted,
             uptime: data.uptime,
@@ -527,7 +610,7 @@ const BigfootNetworkOptimizer = () => {
       }
       
       if (type === 'share_accepted') {
-        console.log('✅ Share accepted! +0.1 PKT = +0.1 BIG Points');
+        console.log('✅ Share accepted! +0.1 BIG Points');
         
         // Record in Firebase if logged in
         if (earningsService && currentSessionId) {
@@ -537,7 +620,6 @@ const BigfootNetworkOptimizer = () => {
             setUserEarnings(prev => ({
               ...prev,
               totalBigPointsEarned: newTotals.totalBigPointsEarned,
-              totalPKTEarned: newTotals.totalPKTEarned,
               totalSharesAccepted: prev.totalSharesAccepted + 1
             }));
           }
@@ -552,93 +634,6 @@ const BigfootNetworkOptimizer = () => {
     };
   }, [earningsService, currentSessionId]);
 
-  // Start sharing function
-  const startSharing = async () => {
-    try {
-      setIsSharing(true);
-      
-      // Start Firebase session if user is logged in
-      if (earningsService) {
-        const sessionId = await earningsService.startSession({
-          poolUrl: 'wss://pool.pkt.world/',
-          maxBandwidth: config.maxBandwidth,
-          batteryThreshold: config.batteryThreshold,
-          adaptivePower: config.adaptivePower
-        });
-        setCurrentSessionId(sessionId);
-      }
-      
-      // Start PacketCrypt worker
-      if (workerRef.current) {
-        workerRef.current.postMessage({
-          type: 'start_mining',
-          config: {
-            paymentAddress: config.paymentAddress,
-            poolUrl: 'wss://pool.pkt.world/'
-          }
-        });
-      }
-      
-    } catch (error) {
-      console.error('Error starting sharing:', error);
-      setIsSharing(false);
-    }
-  };
-
-  // Stop sharing function
-  const stopSharing = async () => {
-    try {
-      setIsSharing(false);
-      
-      // Stop PacketCrypt worker
-      if (workerRef.current) {
-        workerRef.current.postMessage({ type: 'stop_mining' });
-      }
-      
-      // End Firebase session if user is logged in
-      if (earningsService && currentSessionId) {
-        await earningsService.endSession({
-          uptime: sharingStats.uptime,
-          sharesFound: sharingStats.sharesFound,
-          sharesAccepted: sharingStats.sharesAccepted,
-          hashrate: sharingStats.hashrate,
-          errors: sharingStats.errors
-        });
-        setCurrentSessionId(null);
-      }
-      
-      // Reset stats
-      setSharingStats(prev => ({
-        ...prev,
-        hashrate: 0,
-        poolConnected: false
-      }));
-      
-    } catch (error) {
-      console.error('Error stopping sharing:', error);
-    }
-  };
-
-  // Handle auth
-  const handleLogin = () => setShowAuthModal(true);
-  const handleLogout = async () => {
-    if (isSharing) await stopSharing();
-    await signOut(auth);
-  };
-
-  // Format time helper
-  const formatTime = (seconds) => {
-    const hours = Math.floor(seconds / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    const secs = seconds % 60;
-    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-  };
-
-  // Format number helper
-  const formatNumber = (num, decimals = 2) => {
-    return typeof num === 'number' ? num.toFixed(decimals) : '0.00';
-  };
-
   if (authLoading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-gray-900 to-gray-800 flex items-center justify-center">
@@ -652,20 +647,38 @@ const BigfootNetworkOptimizer = () => {
       {/* Header */}
       <div className="bg-gray-800/50 backdrop-blur-sm border-b border-gray-700 px-4 py-3">
         <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-3">
-            <div className="w-8 h-8 bg-gradient-to-r from-blue-500 to-purple-500 rounded-lg flex items-center justify-center">
-              <span className="text-xs font-bold">BF</span>
-            </div>
-            <div>
-              <h1 className="text-lg font-bold">BIGFOOT Mobile</h1>
-              <p className="text-xs text-gray-400">PKT Network Optimizer</p>
-            </div>
+          {/* Left side - Welcome back + Avatar (only when logged in) */}
+          <div className="flex items-center space-x-3 min-w-0 flex-1">
+            {user ? (
+              <>
+                <div className="w-8 h-8 bg-gradient-to-r from-blue-500 to-purple-500 rounded-full flex items-center justify-center flex-shrink-0">
+                  <span className="text-white font-bold text-sm">🦍</span>
+                </div>
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-white truncate">
+                    Welcome back, {user.displayName || user.email?.split('@')[0] || 'User'}
+                  </p>
+                  <p className="text-xs text-gray-400 truncate">
+                    {formatNumber(userEarnings.totalBigPointsEarned, 4)} BIG Points
+                  </p>
+                </div>
+              </>
+            ) : (
+              <div></div>
+            )}
+          </div>
+
+          {/* Center - Title */}
+          <div className="text-center flex-shrink-0">
+            <h1 className="text-lg font-bold">BIGFOOT Connect Mobile</h1>
+            <p className="text-xs text-gray-400">Idle Bandwidth Sharing Platform</p>
           </div>
           
-          <div className="text-right">
+          {/* Right side - User info / Login button */}
+          <div className="text-right min-w-0 flex-1 flex justify-end">
             {user ? (
-              <div>
-                <p className="text-sm font-medium">{user.displayName || 'User'}</p>
+              <div className="min-w-0">
+                <p className="text-sm font-medium truncate">{user.displayName || user.email?.split('@')[0] || 'User'}</p>
                 <button 
                   onClick={handleLogout}
                   className="text-xs text-blue-400 hover:text-blue-300"
@@ -767,9 +780,6 @@ const BigfootNetworkOptimizer = () => {
                   <p className="text-3xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
                     {formatNumber(userEarnings.totalBigPointsEarned, 4)} BIG
                   </p>
-                  <p className="text-lg text-gray-300">
-                    = {formatNumber(userEarnings.totalPKTEarned, 4)} PKT
-                  </p>
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
@@ -782,19 +792,18 @@ const BigfootNetworkOptimizer = () => {
                     <p className="text-lg font-bold text-purple-400">{userEarnings.sessionsCompleted}</p>
                   </div>
                   <div className="bg-green-600/20 border border-green-500/30 p-3 rounded-lg">
-                    <p className="text-xs text-green-300">Avg Hashrate</p>
-                    <p className="text-lg font-bold text-green-400">{userEarnings.averageHashrate} H/s</p>
+                    <p className="text-xs text-green-300">Success Rate</p>
+                    <p className="text-lg font-bold text-green-400">{formatNumber(userEarnings.shareAcceptanceRate)}%</p>
                   </div>
                   <div className="bg-orange-600/20 border border-orange-500/30 p-3 rounded-lg">
-                    <p className="text-xs text-orange-300">Success Rate</p>
-                    <p className="text-lg font-bold text-orange-400">{formatNumber(userEarnings.shareAcceptanceRate)}%</p>
+                    <p className="text-xs text-orange-300">Total Time</p>
+                    <p className="text-lg font-bold text-orange-400">{formatTime(userEarnings.totalMiningTime)}</p>
                   </div>
                 </div>
 
                 <div className="bg-gray-700/30 p-3 rounded-lg">
                   <p className="text-sm text-gray-400 mb-1">Conversion Rate</p>
-                  <p className="text-xs text-gray-300">1 Share = 0.1 PKT = 0.1 BIG Points</p>
-                  <p className="text-xs text-gray-400 mt-2">Total Time: {formatTime(userEarnings.totalMiningTime)}</p>
+                  <p className="text-xs text-gray-300">1 Share = 0.1 BIG Points</p>
                 </div>
               </div>
             )}
@@ -819,23 +828,18 @@ const BigfootNetworkOptimizer = () => {
               <div className="space-y-4">
                 <div className="text-center mb-4">
                   <p className="text-sm text-gray-400 mb-1">Session Rewards</p>
-                  <div className="flex items-center justify-center space-x-4">
+                  <div className="flex items-center justify-center">
                     <div>
-                      <p className="text-2xl font-bold text-blue-400">{formatNumber(sharingStats.bigRewards, 4)}</p>
-                      <p className="text-xs text-gray-400">BIG Points</p>
-                    </div>
-                    <div className="text-gray-500">=</div>
-                    <div>
-                      <p className="text-2xl font-bold text-purple-400">{formatNumber(sharingStats.pktRewards, 4)}</p>
-                      <p className="text-xs text-gray-400">PKT</p>
+                      <p className="text-3xl font-bold text-blue-400">{formatNumber(sharingStats.bigRewards, 4)}</p>
+                      <p className="text-sm text-gray-400">BIG Points</p>
                     </div>
                   </div>
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
                   <div className="bg-gray-700/50 p-3 rounded-lg">
-                    <p className="text-sm text-gray-400">Hashrate</p>
-                    <p className="text-lg font-bold">{sharingStats.hashrate} H/s</p>
+                    <p className="text-sm text-gray-400">Session Time</p>
+                    <p className="text-lg font-bold">{formatTime(sharingStats.uptime)}</p>
                   </div>
                   <div className="bg-gray-700/50 p-3 rounded-lg">
                     <p className="text-sm text-gray-400">Shares/Hour</p>
@@ -862,6 +866,11 @@ const BigfootNetworkOptimizer = () => {
                     <p className="text-sm text-yellow-300">Connection Errors: {sharingStats.errors}</p>
                   </div>
                 )}
+
+                <div className="bg-gray-700/30 p-3 rounded-lg">
+                  <p className="text-sm text-gray-400 mb-1">Conversion Rate</p>
+                  <p className="text-xs text-gray-300">1 Share Accepted = 0.1 BIG Points</p>
+                </div>
               </div>
             )}
 
@@ -975,7 +984,7 @@ const BigfootNetworkOptimizer = () => {
       {showAuthModal && (
         <AuthModal 
           isOpen={showAuthModal} 
-          onClose={() => setShowAuthModal(false)} 
+          onClose={() => setShowAuthModal(false)}
         />
       )}
     </div>
